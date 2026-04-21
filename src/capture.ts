@@ -154,6 +154,11 @@ export interface SubscribeOptions {
  */
 const SKIP_MAP_MAX_ENTRIES = 1000;
 
+/** Interval between WebSocket pings. */
+const PING_INTERVAL_MS = 30_000;
+/** Grace window for a pong before we give up on a half-open connection. */
+const PONG_TIMEOUT_MS = 10_000;
+
 export interface Subscription {
   close(): void;
   sessionId: string;
@@ -180,9 +185,16 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
   const skipByRequestId = new Map<string, SkipFilter>();
 
   let closed = false;
+  let pingTimer: NodeJS.Timeout | undefined;
+  let pongWatchdog: NodeJS.Timeout | undefined;
+  const clearTimers = () => {
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = undefined; }
+    if (pongWatchdog) { clearTimeout(pongWatchdog); pongWatchdog = undefined; }
+  };
   const close = () => {
     if (closed) return;
     closed = true;
+    clearTimers();
     try { ws.close(); } catch { /* ignore */ }
   };
 
@@ -192,7 +204,25 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
     } catch (err) {
       opts.onError(new Error(`Failed to init WebSocket: ${(err as Error).message}`));
       close();
+      return;
     }
+    // Ping loop: half-open TCP connections (laptop sleep, NAT drop) won't
+    // trigger `close` on their own — pings surface them as pong timeouts.
+    pingTimer = setInterval(() => {
+      if (closed || ws.readyState !== WebSocket.OPEN) return;
+      try { ws.ping(); } catch { /* ignore */ }
+      if (pongWatchdog) clearTimeout(pongWatchdog);
+      pongWatchdog = setTimeout(() => {
+        opts.onError(new Error(
+          `No pong within ${PONG_TIMEOUT_MS}ms — connection appears half-open, closing.`,
+        ));
+        close();
+      }, PONG_TIMEOUT_MS);
+    }, PING_INTERVAL_MS);
+  });
+
+  ws.on("pong", () => {
+    if (pongWatchdog) { clearTimeout(pongWatchdog); pongWatchdog = undefined; }
   });
 
   ws.on("message", (data: WebSocket.Data) => {
@@ -323,7 +353,7 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
   });
 
   ws.on("error", (err) => opts.onError(new Error(`WebSocket error: ${err.message}`)));
-  ws.on("close", () => { closed = true; opts.onClose(); });
+  ws.on("close", () => { closed = true; clearTimers(); opts.onClose(); });
 
   return { close, sessionId: opts.sessionId };
 }

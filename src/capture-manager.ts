@@ -23,6 +23,14 @@ export interface ManagerStatus {
    * events, warn the user" even if `state` is "running".
    */
   healthy: boolean;
+  /**
+   * True while an auto-reconnect is in flight after a transient WebSocket
+   * close. The agent can relay this to the user so they know the MCP is
+   * trying to recover without manual intervention.
+   */
+  reconnecting?: boolean;
+  /** Number of auto-reconnect attempts made since the most recent clean run. */
+  reconnectAttempts?: number;
   sessionId?: string;
   startedAt?: number;
   startedAtIso?: string;
@@ -38,6 +46,13 @@ export interface ManagerStatus {
   guidance: string;
 }
 
+/**
+ * Backoff schedule (ms) for auto-reconnect. After the last entry is exhausted
+ * we give up and move to state="stopped" — the agent can then re-issue
+ * htk_start_capture.
+ */
+const RECONNECT_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 15_000, 30_000, 30_000, 30_000, 30_000, 30_000];
+
 export interface StartOptions {
   adminUrl: string;
   sessionId: string;
@@ -49,6 +64,9 @@ export class CaptureManager {
   private subscription?: Subscription;
   private lastError?: string;
   private connectingTimer?: NodeJS.Timeout;
+  private reconnectTimer?: NodeJS.Timeout;
+  private reconnectAttempts = 0;
+  private currentStartOpts?: StartOptions;
   private readonly filters = new FilterRegistry();
 
   constructor(private readonly buffer: CaptureBuffer) {}
@@ -61,6 +79,8 @@ export class CaptureManager {
       clearTimeout(this.connectingTimer);
       this.connectingTimer = undefined;
     }
+    // A healthy-enough session resets the backoff counter.
+    this.reconnectAttempts = 0;
   }
 
   async start(opts: StartOptions): Promise<ManagerStatus> {
@@ -79,7 +99,14 @@ export class CaptureManager {
     const startedAt = Date.now();
     this.state = { kind: "connecting", sessionId: opts.sessionId, startedAt };
     this.lastError = undefined;
+    this.currentStartOpts = opts;
+    this.reconnectAttempts = 0;
+    this.openSubscription(opts, startedAt);
 
+    return this.status();
+  }
+
+  private openSubscription(opts: StartOptions, startedAt: number): void {
     this.subscription = subscribeToSession({
       adminUrl: opts.adminUrl,
       sessionId: opts.sessionId,
@@ -107,16 +134,10 @@ export class CaptureManager {
           clearTimeout(this.connectingTimer);
           this.connectingTimer = undefined;
         }
-        if (this.state.kind !== "stopped" && this.state.kind !== "idle") {
-          this.state = {
-            kind: "stopped",
-            sessionId: this.state.sessionId,
-            startedAt: "startedAt" in this.state ? this.state.startedAt : Date.now(),
-            stoppedAt: Date.now(),
-            reason: this.lastError ?? "WebSocket closed",
-          };
-        }
         this.subscription = undefined;
+        // If we're mid-shutdown (stop() was called) don't auto-reconnect.
+        if (this.state.kind === "stopped" || this.state.kind === "idle") return;
+        this.scheduleReconnect(startedAt);
       },
     });
 
@@ -127,8 +148,31 @@ export class CaptureManager {
       this.connectingTimer = undefined;
       this.markRunning(opts.sessionId, startedAt);
     }, 2000);
+  }
 
-    return this.status();
+  private scheduleReconnect(startedAt: number): void {
+    const opts = this.currentStartOpts;
+    if (!opts) return;
+    if (this.reconnectAttempts >= RECONNECT_BACKOFF_MS.length) {
+      // Gave up — move to terminal stopped state.
+      if (this.state.kind !== "stopped" && this.state.kind !== "idle") {
+        this.state = {
+          kind: "stopped",
+          sessionId: this.state.sessionId,
+          startedAt: "startedAt" in this.state ? this.state.startedAt : startedAt,
+          stoppedAt: Date.now(),
+          reason: `auto-reconnect exhausted after ${RECONNECT_BACKOFF_MS.length} attempts; last error: ${this.lastError ?? "unknown"}`,
+        };
+      }
+      return;
+    }
+    const delay = RECONNECT_BACKOFF_MS[this.reconnectAttempts];
+    this.reconnectAttempts++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.state.kind === "stopped" || this.state.kind === "idle") return;
+      this.openSubscription(opts, startedAt);
+    }, delay);
   }
 
   stop(reason: string = "stopped by user"): ManagerStatus {
@@ -141,6 +185,12 @@ export class CaptureManager {
       clearTimeout(this.connectingTimer);
       this.connectingTimer = undefined;
     }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    this.currentStartOpts = undefined;
+    this.reconnectAttempts = 0;
     if (this.subscription) {
       try { this.subscription.close(); } catch { /* ignore */ }
       this.subscription = undefined;
@@ -170,10 +220,13 @@ export class CaptureManager {
 
   status(): ManagerStatus {
     const cap = this.buffer.capacity();
+    const reconnecting = this.reconnectTimer !== undefined;
     const base: ManagerStatus = {
       mcpServerVersion: MCP_SERVER_VERSION,
       state: this.state.kind,
-      healthy: this.state.kind === "running" && !this.lastError,
+      healthy: this.state.kind === "running" && !this.lastError && !reconnecting,
+      reconnecting: reconnecting || undefined,
+      reconnectAttempts: this.reconnectAttempts || undefined,
       bufferedExchanges: this.buffer.size(),
       bufferCapacity: cap.exchanges,
       bufferedBodyBytes: this.buffer.bodyBytes(),
@@ -217,6 +270,7 @@ export class CaptureManager {
         const buffered = this.buffer.size();
         const bodyMB = (this.buffer.bodyBytes() / (1024 * 1024)).toFixed(1);
         const budgetMB = (this.buffer.capacity().bodyBytes / (1024 * 1024)).toFixed(0);
+        const reconnecting = this.reconnectTimer !== undefined;
         const lines = [
           `Background capture is running against session ${this.state.sessionId} (started ${minutesRunning} min ago). ${buffered} exchanges buffered, using ${bodyMB} of ${budgetMB} MB body budget.`,
           "",
@@ -226,6 +280,12 @@ export class CaptureManager {
           "",
           "If memory pressure becomes an issue, use htk_buffer_stats to identify heavy hosts and htk_add_skip_filter to stop capturing their bodies (the exchange records still show up, just with bodySkipped=true).",
         ];
+        if (reconnecting) {
+          lines.unshift(
+            `WARNING: the WebSocket dropped and an auto-reconnect is in flight (attempt ${this.reconnectAttempts} of ${RECONNECT_BACKOFF_MS.length}). Events captured during the gap are lost. Tell the user; they may want to reproduce the activity after reconnect.`,
+            "",
+          );
+        }
         if (this.lastError) {
           lines.push("");
           lines.push(`Note: last error on the subscription: ${this.lastError}. If no new exchanges arrive, the session UUID may be stale — see below.`);
