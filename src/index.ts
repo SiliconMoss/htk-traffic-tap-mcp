@@ -529,20 +529,22 @@ Args:
     });
 
     // With no bodies here, this response is small; only risk is huge headers.
-    let text = JSON.stringify(view, null, 2);
+    // Mutate the view in place on truncation so the text and structuredContent
+    // stay consistent — otherwise clients that prefer structuredContent would
+    // see the full headers while the text claims they were dropped.
+    const annotated: typeof view & { truncated?: boolean; truncationNote?: string } = view;
+    let text = JSON.stringify(annotated, null, 2);
     if (text.length > CHARACTER_LIMIT) {
-      view.request.headers = undefined;
-      if (view.response) view.response.headers = undefined;
-      text = JSON.stringify({
-        ...view,
-        truncated: true,
-        truncationNote: "Headers exceeded character cap and were dropped. Re-fetch without include_*_headers flags.",
-      }, null, 2);
+      annotated.request.headers = undefined;
+      if (annotated.response) annotated.response.headers = undefined;
+      annotated.truncated = true;
+      annotated.truncationNote = "Headers exceeded character cap and were dropped. Re-fetch without include_*_headers flags.";
+      text = JSON.stringify(annotated, null, 2);
     }
 
     return {
       content: [{ type: "text" as const, text }],
-      structuredContent: view as unknown as { [key: string]: unknown },
+      structuredContent: annotated as unknown as { [key: string]: unknown },
     };
   },
 );
@@ -672,21 +674,21 @@ Returns: { totalMatches, returned, truncated, matches: [{offset, lineNumber, col
     if (!result.ok) return bodyErrorToMcp(params.id, params.which, result.error);
 
     // Server-side safety net: the combined matches+context could blow the cap
-    // if the agent requested very large contexts.
-    let text = JSON.stringify(result.value, null, 2);
+    // if the agent requested very large contexts. Mutate in place so text and
+    // structuredContent stay consistent.
+    const searchView = result.value as typeof result.value & { truncationNote?: string };
+    let text = JSON.stringify(searchView, null, 2);
     if (text.length > CHARACTER_LIMIT) {
-      const halfPoint = Math.max(1, Math.floor(result.value.matches.length / 2));
-      result.value.matches = result.value.matches.slice(0, halfPoint);
-      result.value.returned = result.value.matches.length;
-      result.value.truncated = true;
-      text = JSON.stringify({
-        ...result.value,
-        truncationNote: `Response exceeded ${CHARACTER_LIMIT} chars; kept first ${halfPoint} matches. Narrow the pattern or reduce context_before/context_after.`,
-      }, null, 2);
+      const halfPoint = Math.max(1, Math.floor(searchView.matches.length / 2));
+      searchView.matches = searchView.matches.slice(0, halfPoint);
+      searchView.returned = searchView.matches.length;
+      searchView.truncated = true;
+      searchView.truncationNote = `Response exceeded ${CHARACTER_LIMIT} chars; kept first ${halfPoint} matches. Narrow the pattern or reduce context_before/context_after.`;
+      text = JSON.stringify(searchView, null, 2);
     }
     return {
       content: [{ type: "text" as const, text }],
-      structuredContent: result.value as unknown as { [key: string]: unknown },
+      structuredContent: searchView as unknown as { [key: string]: unknown },
     };
   },
 );
