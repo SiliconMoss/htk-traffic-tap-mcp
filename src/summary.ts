@@ -3,11 +3,12 @@
  * list_exchanges response stays well under any reasonable agent context budget.
  *
  * Tiers (cheapest → most detail):
- *   summary  — method, host, path-truncated, status, resp content-type        (~150 B per exchange)
- *   meta     — summary + header counts, body byte counts, timing tags         (~300 B per exchange)
- *   headers  — meta + full headers dicts (raw strings from HTT)               (1-5 KB per exchange)
+ *   summary  — method, host, path-truncated, status, resp content-type, skip marker  (~150 B)
+ *   meta     — summary + header counts, body byte counts                             (~300 B)
+ *   headers  — meta + full headers dicts                                              (1-5 KB)
  *
- * Bodies are NEVER returned by list_exchanges. Use htk_get_exchange for that.
+ * Bodies are NEVER returned here. Use htk_get_exchange / htk_get_exchange_body
+ * / htk_search_exchange_body for body access.
  */
 
 import type { CapturedExchange, CapturedRequest, CapturedResponse } from "./types.js";
@@ -20,9 +21,9 @@ export const PATH_TRUNCATE_AT = 128;
 interface UrlParts {
   scheme: string;
   host: string;
-  path: string;           // path + query, possibly truncated
+  path: string;
   pathTruncatedFrom?: number;
-  url: string;            // full URL, possibly truncated
+  url: string;
   urlTruncatedFrom?: number;
 }
 
@@ -31,7 +32,6 @@ function splitUrl(urlStr: string): UrlParts {
   try {
     parsed = new URL(urlStr);
   } catch {
-    // Malformed URL — return as-is.
     return {
       scheme: "",
       host: "",
@@ -57,7 +57,6 @@ function truncateWith(s: string, max: number): string {
   return s.slice(0, max - 3) + "...";
 }
 
-/** HTT serializes headers as a JSON *string* in some code paths. Normalize to a record. */
 function normalizeHeaders(h: unknown): Record<string, string> {
   if (typeof h === "string") {
     try {
@@ -90,9 +89,10 @@ function headerBytes(h: Record<string, string>): number {
   return n;
 }
 
-function bodyBytes(body: string | undefined): number {
-  if (!body) return 0;
-  return Buffer.byteLength(body, "utf-8");
+export interface BodySkipInfo {
+  bodySkipped: true;
+  bodySkipFilterId?: number;
+  bodySkipPattern?: string;
 }
 
 export interface ExchangeSummary {
@@ -100,13 +100,15 @@ export interface ExchangeSummary {
   method: string;
   scheme: string;
   host: string;
-  path: string;                       // truncated at PATH_TRUNCATE_AT
+  path: string;
   pathTruncatedFrom?: number;
-  url: string;                        // truncated at URL_TRUNCATE_AT
+  url: string;
   urlTruncatedFrom?: number;
-  status?: number;                    // response status, if any
+  status?: number;
   responseContentType?: string;
   hasResponse: boolean;
+  requestBodySkipped?: BodySkipInfo;
+  responseBodySkipped?: BodySkipInfo;
   tags?: string[];
 }
 
@@ -115,17 +117,24 @@ export interface ExchangeMeta extends ExchangeSummary {
   requestHeaderCount: number;
   requestHeaderBytes: number;
   requestBodyBytes: number;
-  requestBodyTruncated?: boolean;
   responseHeaderCount?: number;
   responseHeaderBytes?: number;
   responseBodyBytes?: number;
-  responseBodyTruncated?: boolean;
   responseStatusMessage?: string;
 }
 
 export interface ExchangeWithHeaders extends ExchangeMeta {
   requestHeaders: Record<string, string>;
   responseHeaders?: Record<string, string>;
+}
+
+function skipInfoFor(side: { bodySkipped?: boolean; bodySkipFilterId?: number; bodySkipPattern?: string }): BodySkipInfo | undefined {
+  if (!side.bodySkipped) return undefined;
+  return {
+    bodySkipped: true,
+    bodySkipFilterId: side.bodySkipFilterId,
+    bodySkipPattern: side.bodySkipPattern,
+  };
 }
 
 export function summarize(exchange: CapturedExchange): ExchangeSummary {
@@ -144,6 +153,8 @@ export function summarize(exchange: CapturedExchange): ExchangeSummary {
     status: exchange.response?.statusCode,
     responseContentType: respHeaders ? pickHeader(respHeaders, "content-type") : undefined,
     hasResponse: !!exchange.response,
+    requestBodySkipped: skipInfoFor(req),
+    responseBodySkipped: exchange.response ? skipInfoFor(exchange.response) : undefined,
     tags: req.tags?.length ? req.tags : undefined,
   };
 }
@@ -159,12 +170,10 @@ export function toMeta(exchange: CapturedExchange): ExchangeMeta {
     requestContentType: pickHeader(reqHeaders, "content-type"),
     requestHeaderCount: Object.keys(reqHeaders).length,
     requestHeaderBytes: headerBytes(reqHeaders),
-    requestBodyBytes: bodyBytes(req.body),
-    requestBodyTruncated: req.bodyTruncated,
+    requestBodyBytes: req.bodyBytes,
     responseHeaderCount: respHeaders ? Object.keys(respHeaders).length : undefined,
     responseHeaderBytes: respHeaders ? headerBytes(respHeaders) : undefined,
-    responseBodyBytes: resp ? bodyBytes(resp.body) : undefined,
-    responseBodyTruncated: resp?.bodyTruncated,
+    responseBodyBytes: resp?.bodyBytes,
     responseStatusMessage: resp?.statusMessage,
   };
 }
@@ -178,7 +187,6 @@ export function toWithHeaders(exchange: CapturedExchange): ExchangeWithHeaders {
   };
 }
 
-/** Render an exchange at the requested detail level. */
 export function render(
   exchange: CapturedExchange,
   level: DetailLevel,
@@ -190,7 +198,8 @@ export function render(
   }
 }
 
-/** Detail views for htk_get_exchange. */
+/** Detail views for htk_get_exchange. Bodies are byte-count only — use
+ * htk_get_exchange_body / htk_search_exchange_body to read body contents. */
 export interface GetExchangeView {
   id: string;
   method: string;
@@ -205,25 +214,21 @@ export interface GetExchangeView {
   remoteIpAddress?: string;
   request: {
     headers?: Record<string, string>;
-    body?: string;
     bodyBytes: number;
-    bodyTruncated?: boolean;
+    bodySkipped?: BodySkipInfo;
   };
   response?: {
     statusCode: number;
     statusMessage: string;
     headers?: Record<string, string>;
-    body?: string;
     bodyBytes: number;
-    bodyTruncated?: boolean;
+    bodySkipped?: BodySkipInfo;
   };
 }
 
 export interface GetExchangeOptions {
   includeRequestHeaders?: boolean;
   includeResponseHeaders?: boolean;
-  includeRequestBody?: boolean;
-  includeResponseBody?: boolean;
 }
 
 export function getExchangeView(
@@ -248,18 +253,16 @@ export function getExchangeView(
     remoteIpAddress: req.remoteIpAddress,
     request: {
       headers: opts.includeRequestHeaders ? normalizeHeaders(req.headers) : undefined,
-      body: opts.includeRequestBody ? req.body : undefined,
-      bodyBytes: bodyBytes(req.body),
-      bodyTruncated: req.bodyTruncated,
+      bodyBytes: req.bodyBytes,
+      bodySkipped: skipInfoFor(req),
     },
     response: resp
       ? {
           statusCode: resp.statusCode,
           statusMessage: resp.statusMessage,
           headers: opts.includeResponseHeaders ? normalizeHeaders(resp.headers) : undefined,
-          body: opts.includeResponseBody ? resp.body : undefined,
-          bodyBytes: bodyBytes(resp.body),
-          bodyTruncated: resp.bodyTruncated,
+          bodyBytes: resp.bodyBytes,
+          bodySkipped: skipInfoFor(resp),
         }
       : undefined,
   };

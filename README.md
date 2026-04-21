@@ -34,7 +34,11 @@ If you want the full HTT feature surface (launching interceptors, configuring ru
 | `htk_capture_status` | Reports whether capture is running, which session, how long it's been running, how many exchanges are buffered. Includes `guidance` text the agent can read to the user. |
 | `htk_clear_capture` | Empties the buffer without stopping capture. |
 | `htk_list_exchanges` | Paginated, tiered-detail query over the buffer. Summary view is ~150 B per exchange (default); `meta` adds byte counts; `headers` adds full headers. Bodies are never included here. Filter by URL/host substring, HTTP method, response status. |
-| `htk_get_exchange` | Fetches a single exchange by id. Headers and bodies are opt-in (`include_request_headers`, `include_request_body`, `include_response_headers`, `include_response_body`) so you pay only for what you need. |
+| `htk_get_exchange` | Fetches metadata for a single exchange by id. Headers opt-in. Bodies are intentionally NOT returned here — use the body-access tools below. |
+| `htk_get_exchange_body` | Read a byte range of a body (`id`, `which`, `offset`, `length`). Max 8 KB per call. Reports `totalBytes` + `nextOffset` for pagination. UTF-8 if valid, otherwise base64. |
+| `htk_search_exchange_body` | Regex search over a body with byte offsets, 1-indexed line/column, and surrounding context. Returns the first N matches (default 20). Body-size cap 8 MB; pattern length cap 500 chars. |
+| `htk_buffer_stats` | Reports buffer usage and top-N hosts by body bytes. Use this to spot memory hogs worth filtering. |
+| `htk_add_skip_filter` / `htk_list_skip_filters` / `htk_remove_skip_filter` | Manage URL substring filters. Matched requests still show up as exchanges (metadata + `bodySkipped: true`) but bodies aren't stored — saves body-byte budget for the traffic you care about. |
 
 ## How capture works
 
@@ -119,6 +123,8 @@ All optional; defaults match a standard HTTP Toolkit desktop install.
 | `HTK_SERVER_TOKEN` | _(unset)_ | Required for the prod HTTP Toolkit build. **Auto-detected on Windows** via PEB walk of the running `httptoolkit-server` process. Set explicitly to override. |
 | `HTK_DISABLE_TOKEN_AUTODETECT` | _(unset)_ | Set to `1` to disable Windows token auto-detection. |
 | `HTK_SESSION_ID` | _(unset)_ | HTTP Toolkit session UUID. If set, background capture auto-starts on MCP boot. |
+| `HTK_BODY_BUDGET_MB` | `100` | Memory budget for body bytes in the capture buffer. Oldest exchanges are evicted when exceeded. |
+| `HTK_EXCHANGE_CAP` | `2000` | Absolute cap on buffered exchanges regardless of byte size. |
 
 ### Auto-start on boot
 
@@ -154,6 +160,17 @@ The UUID rotates each HTT launch, so explicit `htk_start_capture` calls are usua
   "arguments": { "id": "abc117b4-77bc-4804-a4fa-6c1934c9c349" }
 }
 ```
+
+## Memory-budget design
+
+Each running capture has two caps; eviction is LRU when either is exceeded:
+
+| Limit | Default | Override |
+|---|---|---|
+| Total body bytes in buffer | 100 MB | `HTK_BODY_BUDGET_MB=200` |
+| Exchange count | 2000 | `HTK_EXCHANGE_CAP=5000` |
+
+For heavy traffic the body-bytes cap usually binds first. When you see it filling, call `htk_buffer_stats` to see which hosts are eating budget, then `htk_add_skip_filter` with their substrings — matching requests still get captured as exchanges (URL + method + headers + status) but their bodies are dropped before storage. The agent can swap filters at any time; already-buffered exchanges aren't retroactively affected.
 
 ## Context-budget design
 

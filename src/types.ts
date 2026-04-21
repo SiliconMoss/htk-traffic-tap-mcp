@@ -1,22 +1,31 @@
-export interface CapturedRequest {
+export interface BodyData {
+  /** Raw body bytes. Undefined if skipped by filter or absent. */
+  bodyBuffer?: Buffer;
+  /** Convenience: bodyBuffer?.byteLength ?? 0. Reported even when skipped (will be 0). */
+  bodyBytes: number;
+  /** True when a URL skip filter matched this exchange — body intentionally not captured. */
+  bodySkipped?: boolean;
+  /** Filter id that caused the skip, if any. */
+  bodySkipFilterId?: number;
+  /** Human-readable reason (the filter pattern), for agent UX. */
+  bodySkipPattern?: string;
+}
+
+export interface CapturedRequest extends BodyData {
   id: string;
   method: string;
   url: string;
   protocol: string;
   headers: Record<string, string>;
-  body?: string;
-  bodyTruncated?: boolean;
   remoteIpAddress?: string;
   tags: string[];
 }
 
-export interface CapturedResponse {
+export interface CapturedResponse extends BodyData {
   id: string;
   statusCode: number;
   statusMessage: string;
   headers: Record<string, string>;
-  body?: string;
-  bodyTruncated?: boolean;
   tags: string[];
 }
 
@@ -53,7 +62,7 @@ export interface ConnectionStatus {
   captureState: "idle" | "connecting" | "running" | "stopped";
   captureBufferedExchanges: number;
   /**
-   * Full user-facing guidance the agent should relay verbatim. Tells them
+   * A multi-paragraph string the AI agent should relay verbatim. Tells them
    * whether to start a capture, how to get the UUID, and what limitations apply.
    */
   guidance: string;

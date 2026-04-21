@@ -1,5 +1,6 @@
-import { subscribeToSession, type Subscription } from "./capture.js";
 import { CaptureBuffer } from "./buffer.js";
+import { subscribeToSession, type Subscription } from "./capture.js";
+import { FilterRegistry } from "./filters.js";
 import {
   HOW_TO_GET_SESSION_ID,
   POST_START_WARNING,
@@ -22,12 +23,10 @@ export interface ManagerStatus {
   reason?: string;
   bufferedExchanges: number;
   bufferCapacity: number;
+  bufferedBodyBytes: number;
+  bodyBudgetBytes: number;
+  skipFilters: number;
   lastError?: string;
-  /**
-   * A multi-paragraph string the AI agent should relay to the user. Tells them
-   * what to do next (get the UUID, start capture, reproduce traffic, etc.).
-   * Always populated.
-   */
   guidance: string;
 }
 
@@ -37,24 +36,15 @@ export interface StartOptions {
   headers: Record<string, string>;
 }
 
-/**
- * Owns a single long-running WebSocket subscription plus an in-memory buffer.
- * Starts/stops are idempotent: starting while running with the same session is
- * a no-op; starting with a different session replaces the subscription and
- * clears the buffer.
- */
 export class CaptureManager {
   private state: ManagerState = { kind: "idle" };
   private subscription?: Subscription;
   private lastError?: string;
+  private readonly filters = new FilterRegistry();
 
-  constructor(
-    private readonly buffer: CaptureBuffer,
-    private readonly capacity: number,
-  ) {}
+  constructor(private readonly buffer: CaptureBuffer) {}
 
   async start(opts: StartOptions): Promise<ManagerStatus> {
-    // Replace if switching sessions.
     if (
       this.subscription &&
       this.state.kind !== "idle" &&
@@ -64,7 +54,6 @@ export class CaptureManager {
       this.stopInternal("replaced by start() with different session_id");
       this.buffer.clear();
     } else if (this.state.kind === "running" && this.state.sessionId === opts.sessionId) {
-      // Already running for this session.
       return this.status();
     }
 
@@ -76,9 +65,8 @@ export class CaptureManager {
       adminUrl: opts.adminUrl,
       sessionId: opts.sessionId,
       headers: opts.headers,
+      filters: this.filters,
       onEvent: (event) => {
-        // First event also flips state to running (connection_ack already
-        // succeeded by the time data arrives).
         if (this.state.kind === "connecting") {
           this.state = {
             kind: "running",
@@ -109,15 +97,9 @@ export class CaptureManager {
       },
     });
 
-    // Flip to running optimistically — onEvent would upgrade it too, but this
-    // lets status() show "running" immediately without an event needed.
     setTimeout(() => {
       if (this.state.kind === "connecting" && this.state.sessionId === opts.sessionId) {
-        this.state = {
-          kind: "running",
-          sessionId: opts.sessionId,
-          startedAt,
-        };
+        this.state = { kind: "running", sessionId: opts.sessionId, startedAt };
       }
     }, 500);
 
@@ -153,11 +135,19 @@ export class CaptureManager {
     return this.buffer;
   }
 
+  getFilters(): FilterRegistry {
+    return this.filters;
+  }
+
   status(): ManagerStatus {
+    const cap = this.buffer.capacity();
     const base: ManagerStatus = {
       state: this.state.kind,
       bufferedExchanges: this.buffer.size(),
-      bufferCapacity: this.capacity,
+      bufferCapacity: cap.exchanges,
+      bufferedBodyBytes: this.buffer.bodyBytes(),
+      bodyBudgetBytes: cap.bodyBytes,
+      skipFilters: this.filters.list().length,
       lastError: this.lastError,
       guidance: this.buildGuidance(),
     };
@@ -194,12 +184,16 @@ export class CaptureManager {
       case "running": {
         const minutesRunning = ((Date.now() - this.state.startedAt) / 60000).toFixed(1);
         const buffered = this.buffer.size();
+        const bodyMB = (this.buffer.bodyBytes() / (1024 * 1024)).toFixed(1);
+        const budgetMB = (this.buffer.capacity().bodyBytes / (1024 * 1024)).toFixed(0);
         const lines = [
-          `Background capture is running against session ${this.state.sessionId} (started ${minutesRunning} min ago). ${buffered} exchanges buffered.`,
+          `Background capture is running against session ${this.state.sessionId} (started ${minutesRunning} min ago). ${buffered} exchanges buffered, using ${bodyMB} of ${budgetMB} MB body budget.`,
           "",
           POST_START_WARNING,
           "",
           "To analyze traffic: tell the user to reproduce the activity now (tap in the Android app, refresh the browser, etc.), then call htk_list_exchanges with filters.",
+          "",
+          "If memory pressure becomes an issue, use htk_buffer_stats to identify heavy hosts and htk_add_skip_filter to stop capturing their bodies (the exchange records still show up, just with bodySkipped=true).",
         ];
         if (this.lastError) {
           lines.push("");
