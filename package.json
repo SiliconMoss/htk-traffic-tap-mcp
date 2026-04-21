@@ -1,0 +1,54 @@
+{
+  "name": "@siliconmoss/htk-traffic-tap-mcp",
+  "version": "0.1.0",
+  "description": "Unofficial, minimal, read-only MCP server that taps into a running HTTP Toolkit session to expose captured HTTP(S) traffic to AI assistants. Not affiliated with HTTP Toolkit.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "htk-traffic-tap-mcp": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "httptoolkit",
+    "http",
+    "proxy",
+    "traffic-capture"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SiliconMoss/htk-traffic-tap-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SiliconMoss/htk-traffic-tap-mcp/issues"
+  },
+  "homepage": "https://github.com/SiliconMoss/htk-traffic-tap-mcp#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "koffi": "^2.16.1",
+    "ws": "^8.19.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

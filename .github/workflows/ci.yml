@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build (Node ${{ matrix.node }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck & build
+        run: npm run build
+
+      - name: Verify built entrypoint loads
+        shell: bash
+        run: |
+          # Spawn the server with a 3s kill timer (portable across OSes). A clean
+          # exit here means module resolution + top-level config.loadConfig() both
+          # succeeded. The server itself then waits on stdio indefinitely, which
+          # is why we kill it after the banner prints.
+          node -e "
+          const { spawn } = require('node:child_process');
+          const p = spawn(process.execPath, ['dist/index.js'], { stdio: ['pipe', 'pipe', 'inherit'] });
+          setTimeout(() => { p.kill(); process.exit(0); }, 3000);
+          p.on('exit', c => { if (c !== null && c !== 0) { console.error('exit', c); process.exit(c); } });
+          "
