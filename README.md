@@ -1,6 +1,6 @@
 # htk-traffic-tap-mcp
 
-> **Unofficial — not affiliated with HTTP Toolkit.** This is a community-built, deliberately minimal MCP server. The name deliberately avoids `httptoolkit-*`: it uses the `htk-` abbreviation (the same prefix HTT's own env vars use: `HTK_SERVER_TOKEN`, `HTK_SESSION_ID`) and `-tap-` — networking terminology for a passive, read-only listening point. Published under a scoped npm name (`@siliconmoss/htk-traffic-tap-mcp`) to make its third-party status unambiguous.
+> **Unofficial — not affiliated with HTTP Toolkit.** This is a community-built, deliberately minimal MCP server. The name deliberately avoids `httptoolkit-*`: it uses the `htk-` abbreviation (the same prefix HTT's own env vars use: `HTK_SERVER_TOKEN`, `HTK_SESSION_ID`) and `-tap-` — networking terminology for a passive, read-only listening point. Distributed straight from this GitHub repo, not from the npm registry.
 
 A minimal, read-only MCP server that taps into a running HTTP Toolkit session so AI assistants can read captured HTTP(S) traffic.
 
@@ -70,28 +70,29 @@ When HTTP Toolkit is restarted or its UI reloaded, the session UUID rotates — 
 
 ## Install
 
-Published to npm as a scoped package. No cloning, no build step — your MCP client just invokes it via `npx`:
+This package is installed directly from GitHub via `npx` — no npm registry account needed. Add this to your MCP client config:
 
 ```json
 {
   "mcpServers": {
     "httptoolkit": {
       "command": "npx",
-      "args": ["-y", "@siliconmoss/htk-traffic-tap-mcp"]
+      "args": ["-y", "github:SiliconMoss/htk-traffic-tap-mcp"]
     }
   }
 }
 ```
 
-The first invocation downloads the package and its dependencies (including `koffi`'s prebuilt native binary for your platform). Subsequent runs are instant.
+On first invocation `npx` clones the repo, runs `npm install` (which auto-builds via the `prepare` script), and starts the server. Subsequent runs are cached. To pin to a specific release, append a tag: `github:SiliconMoss/htk-traffic-tap-mcp#v0.1.0`.
+
+Prerequisites on your machine: **Node.js ≥ 18** and **git** (both are standard on most dev machines).
 
 ### Local development (clone + build)
 
 ```bash
 git clone https://github.com/SiliconMoss/htk-traffic-tap-mcp.git
 cd htk-traffic-tap-mcp
-npm install
-npm run build
+npm install   # runs `prepare` which builds automatically
 ```
 
 Then point your MCP client at the absolute path:
@@ -205,23 +206,21 @@ Interceptors are configured manually through the HTT UI. This server only observ
 
 ## Releasing (for maintainers)
 
-CI runs on every push to `main` (typecheck + build across Node 20/22 on Linux/macOS/Windows). To cut a release:
+CI runs on every push to `main` and every PR (typecheck + build across Node 20/22 on Linux/macOS/Windows). To cut a release:
 
 ```bash
-# 1. bump version (patch/minor/major) — this creates a commit and tag
+# 1. bump version (patch/minor/major) — this creates a commit and a tag locally
 npm version patch
 
 # 2. push the commit and the tag
 git push --follow-tags
 ```
 
-The `Release to npm` workflow fires on any pushed tag matching `v*.*.*`:
+The `Release` workflow fires on any pushed tag matching `v*.*.*`:
 1. Checks the tag matches `package.json#version`
-2. Runs `npm ci && npm run build`
-3. Publishes to npm (requires `NPM_TOKEN` secret in the GitHub repo settings)
-4. Creates a GitHub Release with the tarball attached and auto-generated notes
+2. Creates a GitHub Release with auto-generated notes and a prefilled `npx` install snippet pinned to the tag
 
-Set `NPM_TOKEN` once in **Settings → Secrets and variables → Actions** using an npm automation token with publish rights to the `@siliconmoss` scope.
+No npm registry publishing — users install via `npx github:SiliconMoss/htk-traffic-tap-mcp#<tag>` directly. No secrets to configure, no tokens to manage.
 
 ## License
 

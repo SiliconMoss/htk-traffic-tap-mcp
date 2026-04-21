@@ -1,5 +1,5 @@
 {
-  "name": "@siliconmoss/htk-traffic-tap-mcp",
+  "name": "htk-traffic-tap-mcp",
   "version": "0.1.0",
   "description": "Unofficial, minimal, read-only MCP server that taps into a running HTTP Toolkit session to expose captured HTTP(S) traffic to AI assistants. Not affiliated with HTTP Toolkit.",
   "type": "module",
@@ -7,9 +7,7 @@
   "bin": {
     "htk-traffic-tap-mcp": "dist/index.js"
   },
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "files": [
     "dist"
   ],
@@ -17,7 +15,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=18"
