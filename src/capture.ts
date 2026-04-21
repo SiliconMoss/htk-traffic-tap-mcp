@@ -187,7 +187,11 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
     let msg: { type?: string; id?: string; payload?: unknown };
     try {
       msg = JSON.parse(data.toString());
-    } catch {
+    } catch (err) {
+      // One bad frame shouldn't tear down the subscription — report and skip.
+      opts.onError(new Error(
+        `Failed to parse WebSocket frame as JSON: ${(err as Error).message}`,
+      ));
       return;
     }
 

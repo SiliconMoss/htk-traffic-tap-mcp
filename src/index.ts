@@ -31,7 +31,10 @@ import {
 import { getExchangeView, render, type DetailLevel } from "./summary.js";
 import type { ConnectionStatus } from "./types.js";
 
-const config = await loadConfig();
+const config = await loadConfig().catch((err: Error) => {
+  console.error(`[htk-mcp] configuration failed: ${err.message}`);
+  process.exit(1);
+});
 const captureManager = new CaptureManager(
   new CaptureBuffer(BUFFER_CAPACITY, BODY_BUDGET_BYTES),
 );
