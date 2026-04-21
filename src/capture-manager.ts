@@ -1,5 +1,6 @@
 import { CaptureBuffer } from "./buffer.js";
 import { subscribeToSession, type Subscription } from "./capture.js";
+import { MCP_SERVER_VERSION } from "./constants.js";
 import { FilterRegistry } from "./filters.js";
 import {
   HOW_TO_GET_SESSION_ID,
@@ -14,6 +15,7 @@ export type ManagerState =
   | { kind: "stopped"; sessionId: string; startedAt: number; stoppedAt: number; reason: string };
 
 export interface ManagerStatus {
+  mcpServerVersion: string;
   state: "idle" | "connecting" | "running" | "stopped";
   sessionId?: string;
   startedAt?: number;
@@ -142,6 +144,7 @@ export class CaptureManager {
   status(): ManagerStatus {
     const cap = this.buffer.capacity();
     const base: ManagerStatus = {
+      mcpServerVersion: MCP_SERVER_VERSION,
       state: this.state.kind,
       bufferedExchanges: this.buffer.size(),
       bufferCapacity: cap.exchanges,

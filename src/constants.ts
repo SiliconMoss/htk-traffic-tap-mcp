@@ -1,3 +1,10 @@
+/**
+ * Self-reported version string. Bump this alongside package.json on every
+ * release so the agent can verify which code is actually running via
+ * htk_check_connection / htk_capture_status.
+ */
+export const MCP_SERVER_VERSION = "0.3.2";
+
 export const DEFAULT_ADMIN_URL = "http://127.0.0.1:45456";
 export const DEFAULT_SERVER_URL = "http://127.0.0.1:45457";
 

@@ -26,6 +26,7 @@ import {
   MAX_SEARCHABLE_BODY_BYTES,
   MAX_SEARCH_MAX_MATCHES,
   MAX_SEARCH_PATTERN_LENGTH,
+  MCP_SERVER_VERSION,
 } from "./constants.js";
 import { getExchangeView, render, type DetailLevel } from "./summary.js";
 import type { ConnectionStatus } from "./types.js";
@@ -37,7 +38,7 @@ const captureManager = new CaptureManager(
 
 const server = new McpServer({
   name: "htk-traffic-tap-mcp",
-  version: "0.3.1",
+  version: MCP_SERVER_VERSION,
 });
 
 function jsonResult<T extends Record<string, unknown>>(data: T) {
@@ -133,6 +134,7 @@ Use this before htk_capture_traffic to confirm HTTP Toolkit is running and a ses
     }
 
     const status: ConnectionStatus = {
+      mcpServerVersion: MCP_SERVER_VERSION,
       serverUrl: config.serverUrl,
       adminUrl: config.adminUrl,
       serverState: probe.kind,
@@ -823,7 +825,7 @@ async function main() {
   }
 
   console.error(
-    `htk-traffic-tap-mcp running on stdio ` +
+    `htk-traffic-tap-mcp v${MCP_SERVER_VERSION} running on stdio ` +
     `(serverUrl=${config.serverUrl}, adminUrl=${config.adminUrl}, ` +
     `token=${tokenStatus}, session=${config.sessionId ? "env-override" : "managed-lazy"}, ` +
     `auto-capture=${autoStartStatus})`,

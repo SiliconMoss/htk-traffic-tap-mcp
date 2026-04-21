@@ -54,6 +54,11 @@ export type ServerState =
   | "unreachable";
 
 export interface ConnectionStatus {
+  /**
+   * Self-reported MCP server version. Use this to verify which build of
+   * htk-traffic-tap-mcp is running after a deploy/npx-cache update.
+   */
+  mcpServerVersion: string;
   serverUrl: string;
   adminUrl: string;
   serverState: ServerState;
