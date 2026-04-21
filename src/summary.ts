@@ -119,11 +119,13 @@ export interface ExchangeMeta extends ExchangeSummary {
   requestBodyBytes: number;
   requestWireEncoding?: string;
   requestWireBodyBytes?: number;
+  requestBodyDecompressionFailed?: boolean;
   responseHeaderCount?: number;
   responseHeaderBytes?: number;
   responseBodyBytes?: number;
   responseWireEncoding?: string;
   responseWireBodyBytes?: number;
+  responseBodyDecompressionFailed?: boolean;
   responseStatusMessage?: string;
 }
 
@@ -177,11 +179,13 @@ export function toMeta(exchange: CapturedExchange): ExchangeMeta {
     requestBodyBytes: req.bodyBytes,
     requestWireEncoding: req.wireEncoding,
     requestWireBodyBytes: req.wireBodyBytes,
+    requestBodyDecompressionFailed: req.bodyDecompressionFailed,
     responseHeaderCount: respHeaders ? Object.keys(respHeaders).length : undefined,
     responseHeaderBytes: respHeaders ? headerBytes(respHeaders) : undefined,
     responseBodyBytes: resp?.bodyBytes,
     responseWireEncoding: resp?.wireEncoding,
     responseWireBodyBytes: resp?.wireBodyBytes,
+    responseBodyDecompressionFailed: resp?.bodyDecompressionFailed,
     responseStatusMessage: resp?.statusMessage,
   };
 }
@@ -225,6 +229,7 @@ export interface GetExchangeView {
     bodyBytes: number;
     wireEncoding?: string;
     wireBodyBytes?: number;
+    bodyDecompressionFailed?: boolean;
     bodySkipped?: BodySkipInfo;
   };
   response?: {
@@ -234,6 +239,7 @@ export interface GetExchangeView {
     bodyBytes: number;
     wireEncoding?: string;
     wireBodyBytes?: number;
+    bodyDecompressionFailed?: boolean;
     bodySkipped?: BodySkipInfo;
   };
 }
@@ -268,6 +274,7 @@ export function getExchangeView(
       bodyBytes: req.bodyBytes,
       wireEncoding: req.wireEncoding,
       wireBodyBytes: req.wireBodyBytes,
+      bodyDecompressionFailed: req.bodyDecompressionFailed,
       bodySkipped: skipInfoFor(req),
     },
     response: resp
@@ -278,6 +285,7 @@ export function getExchangeView(
           bodyBytes: resp.bodyBytes,
           wireEncoding: resp.wireEncoding,
           wireBodyBytes: resp.wireBodyBytes,
+          bodyDecompressionFailed: resp.bodyDecompressionFailed,
           bodySkipped: skipInfoFor(resp),
         }
       : undefined,

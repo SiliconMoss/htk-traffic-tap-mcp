@@ -45,6 +45,14 @@ export interface BodyRangeResult {
   body: string;
   bodySkipped?: boolean;
   bodySkipReason?: string;
+  /**
+   * Set when the wire body was advertised as gzip/deflate/br but decompression
+   * failed. The returned bytes are the raw compressed stream — agents should
+   * expect garbage and tell the user.
+   */
+  decompressionFailed?: boolean;
+  wireEncoding?: string;
+  warning?: string;
 }
 
 export interface SearchMatch {
@@ -68,6 +76,10 @@ export interface SearchResult {
   matches: SearchMatch[];
   bodySkipped?: boolean;
   bodySkipReason?: string;
+  /** See BodyRangeResult.decompressionFailed. */
+  decompressionFailed?: boolean;
+  wireEncoding?: string;
+  warning?: string;
 }
 
 /** Possible failure modes a caller can translate into MCP errors. */
@@ -119,21 +131,24 @@ export function getBodyRange(
 
   const hasMore = clampedOffset + clampedLength < total;
 
-  return {
-    ok: true,
-    value: {
-      id,
-      which,
-      totalBytes: total,
-      offset: clampedOffset,
-      length: clampedLength,
-      hasMore,
-      nextOffset: hasMore ? clampedOffset + clampedLength : undefined,
-      isUtf8,
-      encoding: isUtf8 ? "utf-8" : "base64",
-      body: isUtf8 ? decoded : slice.toString("base64"),
-    },
+  const result: BodyRangeResult = {
+    id,
+    which,
+    totalBytes: total,
+    offset: clampedOffset,
+    length: clampedLength,
+    hasMore,
+    nextOffset: hasMore ? clampedOffset + clampedLength : undefined,
+    isUtf8,
+    encoding: isUtf8 ? "utf-8" : "base64",
+    body: isUtf8 ? decoded : slice.toString("base64"),
   };
+  if (side.bodyDecompressionFailed) {
+    result.decompressionFailed = true;
+    result.wireEncoding = side.wireEncoding;
+    result.warning = `Body is still ${side.wireEncoding}-compressed; on-the-fly decompression failed at capture time. These bytes are the raw compressed stream and will not look like text.`;
+  }
+  return { ok: true, value: result };
 }
 
 function locate(buf: Buffer, offset: number): { lineNumber: number; column: number } {
@@ -227,18 +242,21 @@ export function searchBody(
     if (m[0].length === 0) re.lastIndex++;
   }
 
-  return {
-    ok: true,
-    value: {
-      id,
-      which,
-      totalBytes: buf.byteLength,
-      pattern,
-      flags: safeFlags,
-      totalMatches,
-      returned: matches.length,
-      truncated: totalMatches > matches.length,
-      matches,
-    },
+  const result: SearchResult = {
+    id,
+    which,
+    totalBytes: buf.byteLength,
+    pattern,
+    flags: safeFlags,
+    totalMatches,
+    returned: matches.length,
+    truncated: totalMatches > matches.length,
+    matches,
   };
+  if (side.bodyDecompressionFailed) {
+    result.decompressionFailed = true;
+    result.wireEncoding = side.wireEncoding;
+    result.warning = `0 matches may be expected: body is still ${side.wireEncoding}-compressed (decompression failed at capture time). The regex ran against raw compressed bytes.`;
+  }
+  return { ok: true, value: result };
 }

@@ -73,7 +73,7 @@ function tryDecompress(
 function decodeBody(
   base64: string | undefined,
   headers: unknown,
-): Pick<BodyData, "bodyBuffer" | "bodyBytes" | "wireEncoding" | "wireBodyBytes"> {
+): Pick<BodyData, "bodyBuffer" | "bodyBytes" | "wireEncoding" | "wireBodyBytes" | "bodyDecompressionFailed"> {
   if (!base64) return { bodyBytes: 0 };
   let raw: Buffer;
   try { raw = Buffer.from(base64, "base64"); }
@@ -91,11 +91,13 @@ function decodeBody(
       };
     }
     // Decompression failed (unknown encoding, corrupted, too big) —
-    // store raw so the agent still has something to inspect.
+    // store raw so the agent still has something to inspect, and flag
+    // it so body-access tools can warn the agent the bytes aren't text.
     return {
       bodyBuffer: raw,
       bodyBytes: raw.byteLength,
-      wireEncoding,  // marker: bytes are still compressed
+      wireEncoding,
+      bodyDecompressionFailed: true,
     };
   }
   return { bodyBuffer: raw, bodyBytes: raw.byteLength };

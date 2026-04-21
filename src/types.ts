@@ -16,6 +16,14 @@ export interface BodyData {
   wireEncoding?: string;
   /** Size of the body as it was on the wire (pre-decompression), if different from bodyBytes. */
   wireBodyBytes?: number;
+  /**
+   * True when the wire body advertised a supported Content-Encoding but
+   * decompression failed (corrupt stream, exceeded max-output guardrail,
+   * etc.). bodyBuffer then holds the raw compressed bytes as a fallback.
+   * Agents running regex / UTF-8 decoding over the buffer should expect
+   * garbage and surface this to the user.
+   */
+  bodyDecompressionFailed?: boolean;
   /** True when a URL skip filter matched this exchange — body intentionally not captured. */
   bodySkipped?: boolean;
   /** Filter id that caused the skip, if any. */
