@@ -1,6 +1,6 @@
 {
   "name": "htk-traffic-tap-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Unofficial, minimal, read-only MCP server that taps into a running HTTP Toolkit session to expose captured HTTP(S) traffic to AI assistants. Not affiliated with HTTP Toolkit.",
   "type": "module",
   "main": "dist/index.js",
