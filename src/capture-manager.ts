@@ -42,9 +42,20 @@ export class CaptureManager {
   private state: ManagerState = { kind: "idle" };
   private subscription?: Subscription;
   private lastError?: string;
+  private connectingTimer?: NodeJS.Timeout;
   private readonly filters = new FilterRegistry();
 
   constructor(private readonly buffer: CaptureBuffer) {}
+
+  private markRunning(sessionId: string, startedAt: number): void {
+    if (this.state.kind === "connecting" && this.state.sessionId === sessionId) {
+      this.state = { kind: "running", sessionId, startedAt };
+    }
+    if (this.connectingTimer) {
+      clearTimeout(this.connectingTimer);
+      this.connectingTimer = undefined;
+    }
+  }
 
   async start(opts: StartOptions): Promise<ManagerStatus> {
     if (
@@ -68,14 +79,11 @@ export class CaptureManager {
       sessionId: opts.sessionId,
       headers: opts.headers,
       filters: this.filters,
+      onReady: () => this.markRunning(opts.sessionId, startedAt),
       onEvent: (event) => {
-        if (this.state.kind === "connecting") {
-          this.state = {
-            kind: "running",
-            sessionId: this.state.sessionId,
-            startedAt: this.state.startedAt,
-          };
-        }
+        // Fallback: some servers might skip connection_ack in edge cases;
+        // first real event also counts as "running".
+        this.markRunning(opts.sessionId, startedAt);
         if (event.kind === "request") {
           this.buffer.pushRequest(event.exchange);
         } else if (event.kind === "response") {
@@ -86,6 +94,10 @@ export class CaptureManager {
         this.lastError = err.message;
       },
       onClose: () => {
+        if (this.connectingTimer) {
+          clearTimeout(this.connectingTimer);
+          this.connectingTimer = undefined;
+        }
         if (this.state.kind !== "stopped" && this.state.kind !== "idle") {
           this.state = {
             kind: "stopped",
@@ -99,11 +111,13 @@ export class CaptureManager {
       },
     });
 
-    setTimeout(() => {
-      if (this.state.kind === "connecting" && this.state.sessionId === opts.sessionId) {
-        this.state = { kind: "running", sessionId: opts.sessionId, startedAt };
-      }
-    }, 500);
+    // Fallback to transition out of "connecting" if the server never sends
+    // connection_ack (shouldn't happen, but guards the UI against a stuck
+    // state). Normal path fires via onReady well before this.
+    this.connectingTimer = setTimeout(() => {
+      this.connectingTimer = undefined;
+      this.markRunning(opts.sessionId, startedAt);
+    }, 2000);
 
     return this.status();
   }
@@ -114,6 +128,10 @@ export class CaptureManager {
   }
 
   private stopInternal(reason: string): void {
+    if (this.connectingTimer) {
+      clearTimeout(this.connectingTimer);
+      this.connectingTimer = undefined;
+    }
     if (this.subscription) {
       try { this.subscription.close(); } catch { /* ignore */ }
       this.subscription = undefined;

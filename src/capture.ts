@@ -140,7 +140,17 @@ export interface SubscribeOptions {
   onEvent: (event: CaptureEvent) => void;
   onError: (err: Error) => void;
   onClose: () => void;
+  /** Fired when the server has accepted the subscription handshake. */
+  onReady?: () => void;
 }
+
+/**
+ * Cap on the `skipByRequestId` map. Entries are created when a skip-filter
+ * matches a request; they're normally cleared when the response arrives.
+ * If a response never arrives (dropped connection, aborted request) the
+ * entry would leak. Cap bounds worst-case memory to ~1000 SkipFilter refs.
+ */
+const SKIP_MAP_MAX_ENTRIES = 1000;
 
 export interface Subscription {
   close(): void;
@@ -199,6 +209,7 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
       try {
         ws.send(JSON.stringify({ id: "1", type: "start", payload: { query: REQUEST_QUERY } }));
         ws.send(JSON.stringify({ id: "2", type: "start", payload: { query: RESPONSE_QUERY } }));
+        opts.onReady?.();
       } catch (err) {
         opts.onError(new Error(`Failed to subscribe: ${(err as Error).message}`));
         close();
@@ -236,6 +247,13 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
       const skip = opts.filters?.match(rr.url);
       let request: CapturedRequest;
       if (skip) {
+        // Bound the map in case responses never arrive for some requests
+        // (dropped connections, aborted requests). Map preserves insertion
+        // order, so deleting the first key evicts the oldest pending entry.
+        if (skipByRequestId.size >= SKIP_MAP_MAX_ENTRIES) {
+          const oldest = skipByRequestId.keys().next().value;
+          if (oldest !== undefined) skipByRequestId.delete(oldest);
+        }
         skipByRequestId.set(rr.id, skip);
         request = {
           id: rr.id,
