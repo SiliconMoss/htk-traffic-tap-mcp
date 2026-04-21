@@ -19,6 +19,7 @@ import {
   BUFFER_CAPACITY,
   CHARACTER_LIMIT,
 } from "./constants.js";
+import { getExchangeView, render, type DetailLevel } from "./summary.js";
 import type { ConnectionStatus } from "./types.js";
 
 const config = await loadConfig();
@@ -318,21 +319,28 @@ server.registerTool(
   },
 );
 
+const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 500;
+
 const ListExchangesInputSchema = z.object({
+  detail: z.enum(["summary", "meta", "headers"]).default("summary")
+    .describe(
+      "Detail tier per exchange. 'summary' (default, ~150 B/exchange) = method, host, path, status, response content-type. 'meta' (~300 B) = summary + header/body byte counts + content-types. 'headers' (1-5 KB) = meta + full headers dict. NEVER returns bodies — use htk_get_exchange for bodies.",
+    ),
   url_filter: z.string().min(1).max(500).optional()
     .describe("Case-sensitive substring match on request URL."),
   method_filter: z.string().min(1).max(20).optional()
     .describe("HTTP method filter, case-insensitive (GET, POST, etc.)."),
   status_filter: z.number().int().min(100).max(599).optional()
-    .describe("Exact response status code to match. Requests without a response yet are excluded."),
-  limit: z.number().int().min(1).max(500).default(100)
-    .describe("Max exchanges to return. Default 100, max 500."),
+    .describe("Exact response status code to match. Excludes requests without a response yet."),
+  host_filter: z.string().min(1).max(253).optional()
+    .describe("Exact or substring match on the request host (Host header). Case-insensitive substring.") ,
+  limit: z.number().int().min(1).max(MAX_LIST_LIMIT).default(DEFAULT_LIST_LIMIT)
+    .describe(`Max exchanges to return. Default ${DEFAULT_LIST_LIMIT}, max ${MAX_LIST_LIMIT}.`),
   offset: z.number().int().min(0).default(0)
-    .describe("Pagination offset into the filtered list."),
+    .describe("Pagination offset into the filtered list. Use with returned nextOffset."),
   newest_first: z.boolean().default(true)
     .describe("If true (default), return newest exchanges first."),
-  include_bodies: z.boolean().default(false)
-    .describe("If true, include request/response bodies. Off by default to keep the list compact — use htk_get_exchange for individual bodies."),
 }).strict();
 
 type ListExchangesInput = z.infer<typeof ListExchangesInputSchema>;
@@ -341,30 +349,40 @@ server.registerTool(
   "htk_list_exchanges",
   {
     title: "List Buffered Exchanges",
-    description: `Read exchanges from the in-memory capture buffer populated by htk_start_capture.
+    description: `Read a paginated, context-safe view of exchanges from the in-memory capture buffer populated by htk_start_capture.
 
-Returns a paginated list of request/response pairs with URL, method, status, headers, tags, and (optionally) bodies. By default bodies are omitted to keep responses small — use htk_get_exchange(id) to fetch full bodies for a specific exchange.
+DESIGNED TO BE SAFE BY DEFAULT: the default 'summary' detail tier is tiny (~150 B per exchange), so even the full 500-item max response stays well inside any agent's context window. Drill into individual exchanges with htk_get_exchange when needed.
 
-Filters are combined with AND semantics. If a background capture isn't running, this returns whatever is currently buffered (may be empty).
+Detail tiers (per-exchange approximate size):
+  - summary (default, ~150 B):   id, method, scheme, host, path (truncated), status, response content-type
+  - meta    (~300 B):            summary + header/body byte counts + request/response content-types
+  - headers (1-5 KB):            meta + full request & response headers dicts
 
-Args:
-  - url_filter (string, optional): substring match on request URL.
-  - method_filter (string, optional): HTTP method, case-insensitive.
-  - status_filter (int, optional): exact response status code (excludes requests without responses yet).
-  - limit (int 1-500): default 100.
-  - offset (int): default 0. Use with returned \`nextOffset\` for pagination.
-  - newest_first (bool): default true.
-  - include_bodies (bool): default false.
+URL handling: URLs are truncated at 256 chars, paths at 128 chars. If truncation occurred, 'urlTruncatedFrom' / 'pathTruncatedFrom' fields report the original length so you know whether to drill down.
 
-Returns BufferQueryResult JSON:
+Bodies are NEVER included. Call htk_get_exchange(id, include_request_body=true, include_response_body=true) for those.
+
+Filters (all ANDed together):
+  - url_filter (string): case-sensitive substring match on the full URL.
+  - method_filter (string): HTTP method, case-insensitive.
+  - status_filter (int): exact response status; excludes in-flight requests.
+  - host_filter (string): case-insensitive substring match on host.
+
+Pagination:
+  - limit (int 1-${MAX_LIST_LIMIT}, default ${DEFAULT_LIST_LIMIT}).
+  - offset (int).
+  - Response returns total (pre-filter), matched (post-filter), returned (this page), hasMore, nextOffset.
+
+Returns:
   {
-    "total": number,                       // total buffered (ignoring filters)
-    "matched": number,                     // total matching filters
+    "total": number,              // total buffered
+    "matched": number,            // total matching filters
     "returned": number,
     "offset": number,
     "hasMore": boolean,
-    "nextOffset": number | undefined,
-    "exchanges": [ { request: {...}, response: {...} | undefined } ]
+    "nextOffset": number?,
+    "detail": "summary" | "meta" | "headers",
+    "exchanges": [ ... ]          // shape depends on detail tier
   }`,
     inputSchema: ListExchangesInputSchema.shape,
     annotations: {
@@ -375,55 +393,61 @@ Returns BufferQueryResult JSON:
     },
   },
   async (params: ListExchangesInput) => {
-    const result = captureManager.getBuffer().query({
+    // Over-fetch so we can apply host_filter after the buffer query (buffer
+    // doesn't know about host). Cheap since exchanges are in-memory.
+    const rawQuery = captureManager.getBuffer().query({
       urlFilter: params.url_filter,
       methodFilter: params.method_filter,
       statusFilter: params.status_filter,
-      limit: params.limit,
-      offset: params.offset,
+      limit: MAX_LIST_LIMIT * 2,
+      offset: 0,
       newestFirst: params.newest_first,
     });
 
-    const view = {
-      total: result.total,
-      matched: result.matched,
-      returned: result.returned,
-      offset: result.offset,
-      hasMore: result.hasMore,
-      nextOffset: result.nextOffset,
-      exchanges: result.exchanges.map((ex) => ({
-        request: {
-          id: ex.request.id,
-          method: ex.request.method,
-          url: ex.request.url,
-          protocol: ex.request.protocol,
-          headers: ex.request.headers,
-          remoteIpAddress: ex.request.remoteIpAddress,
-          tags: ex.request.tags,
-          body: params.include_bodies ? ex.request.body : undefined,
-          bodyTruncated: params.include_bodies ? ex.request.bodyTruncated : undefined,
-        },
-        response: ex.response
-          ? {
-              id: ex.response.id,
-              statusCode: ex.response.statusCode,
-              statusMessage: ex.response.statusMessage,
-              headers: ex.response.headers,
-              tags: ex.response.tags,
-              body: params.include_bodies ? ex.response.body : undefined,
-              bodyTruncated: params.include_bodies ? ex.response.bodyTruncated : undefined,
-            }
-          : undefined,
-      })),
+    const hostFilter = params.host_filter?.toLowerCase();
+    const hostMatched = hostFilter
+      ? rawQuery.exchanges.filter((ex) => {
+          try { return new URL(ex.request.url).host.toLowerCase().includes(hostFilter); }
+          catch { return false; }
+        })
+      : rawQuery.exchanges;
+
+    const offset = params.offset;
+    const page = hostMatched.slice(offset, offset + params.limit);
+    const matched = hostMatched.length;
+
+    const level = params.detail as DetailLevel;
+    const rendered = page.map((ex) => render(ex, level));
+
+    const view: {
+      total: number; matched: number; returned: number; offset: number;
+      hasMore: boolean; nextOffset?: number; detail: DetailLevel;
+      exchanges: unknown[];
+      truncated?: boolean;
+      truncationNote?: string;
+    } = {
+      total: rawQuery.total,
+      matched,
+      returned: rendered.length,
+      offset,
+      hasMore: offset + rendered.length < matched,
+      nextOffset: offset + rendered.length < matched ? offset + rendered.length : undefined,
+      detail: level,
+      exchanges: rendered,
     };
 
+    // Server-side safety net: loop-truncate until under CHARACTER_LIMIT.
     let text = JSON.stringify(view, null, 2);
-    if (text.length > CHARACTER_LIMIT) {
+    while (text.length > CHARACTER_LIMIT && view.exchanges.length > 1) {
       const keep = Math.max(1, Math.floor(view.exchanges.length / 2));
       view.exchanges = view.exchanges.slice(0, keep);
       view.returned = view.exchanges.length;
       view.hasMore = true;
-      view.nextOffset = view.offset + view.exchanges.length;
+      view.nextOffset = offset + view.exchanges.length;
+      view.truncated = true;
+      view.truncationNote =
+        `Response exceeded ${CHARACTER_LIMIT} chars; halved to ${keep} exchanges. ` +
+        `Lower 'detail' level or use filters to see more per page.`;
       text = JSON.stringify(view, null, 2);
     }
 
@@ -437,11 +461,25 @@ Returns BufferQueryResult JSON:
 server.registerTool(
   "htk_get_exchange",
   {
-    title: "Get Full Exchange by ID",
-    description:
-      "Fetch the complete request and response (with bodies) for a single buffered exchange, by its request id. Use the ids returned by htk_list_exchanges.",
+    title: "Get Exchange by ID",
+    description: `Fetch a single buffered exchange by its request id. Headers and bodies are opt-in so you pay only for what you need.
+
+Defaults: returns metadata + bodyBytes counts. Pass the relevant include_* flags to add headers / bodies. Request bodies are truncated at 2 KB, response bodies at 4 KB (bodyTruncated flags report this).
+
+Args:
+  - id (string): the exchange id (from htk_list_exchanges).
+  - include_request_headers (bool, default false)
+  - include_response_headers (bool, default false)
+  - include_request_body (bool, default false)
+  - include_response_body (bool, default false)
+
+Returns a GetExchangeView JSON object.`,
     inputSchema: z.object({
-      id: z.string().min(1).describe("The exchange id (= request id from htk_list_exchanges)."),
+      id: z.string().min(1).describe("The exchange id from htk_list_exchanges."),
+      include_request_headers: z.boolean().default(false),
+      include_response_headers: z.boolean().default(false),
+      include_request_body: z.boolean().default(false),
+      include_response_body: z.boolean().default(false),
     }).strict().shape,
     annotations: {
       readOnlyHint: true,
@@ -450,18 +488,53 @@ server.registerTool(
       openWorldHint: false,
     },
   },
-  async ({ id }) => {
-    const ex = captureManager.getBuffer().get(id);
+  async (params) => {
+    const ex = captureManager.getBuffer().get(params.id);
     if (!ex) {
       return {
         isError: true,
         content: [{
           type: "text" as const,
-          text: `Error: no exchange with id=${id} in buffer. Use htk_list_exchanges to find valid ids.`,
+          text: `Error: no exchange with id=${params.id} in buffer. Use htk_list_exchanges to find valid ids.`,
         }],
       };
     }
-    return jsonResult(ex as unknown as Record<string, unknown>);
+    const view = getExchangeView(ex, {
+      includeRequestHeaders: params.include_request_headers,
+      includeResponseHeaders: params.include_response_headers,
+      includeRequestBody: params.include_request_body,
+      includeResponseBody: params.include_response_body,
+    });
+
+    // Bodies can still exceed limit even with 2/4 KB truncation if headers
+    // are huge. Loop-truncate bodies first, then headers as a last resort.
+    let text = JSON.stringify(view, null, 2);
+    if (text.length > CHARACTER_LIMIT) {
+      if (view.request.body && view.request.body.length > 512) {
+        view.request.body = view.request.body.slice(0, 512) + "... [truncated by character cap]";
+        view.request.bodyTruncated = true;
+      }
+      if (view.response?.body && view.response.body.length > 512) {
+        view.response.body = view.response.body.slice(0, 512) + "... [truncated by character cap]";
+        view.response.bodyTruncated = true;
+      }
+      text = JSON.stringify(view, null, 2);
+    }
+    if (text.length > CHARACTER_LIMIT) {
+      // Last resort: drop headers entirely if they were included.
+      view.request.headers = undefined;
+      if (view.response) view.response.headers = undefined;
+      text = JSON.stringify({
+        ...view,
+        truncated: true,
+        truncationNote: "Response still exceeded cap after body truncation; headers removed. Re-fetch with narrower include_* flags.",
+      }, null, 2);
+    }
+
+    return {
+      content: [{ type: "text" as const, text }],
+      structuredContent: view as unknown as { [key: string]: unknown },
+    };
   },
 );
 

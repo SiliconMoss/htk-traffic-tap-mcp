@@ -33,8 +33,8 @@ If you want the full HTT feature surface (launching interceptors, configuring ru
 | `htk_stop_capture` | Stops the running subscription. Buffer preserved for further queries. |
 | `htk_capture_status` | Reports whether capture is running, which session, how long it's been running, how many exchanges are buffered. Includes `guidance` text the agent can read to the user. |
 | `htk_clear_capture` | Empties the buffer without stopping capture. |
-| `htk_list_exchanges` | Paginated query over the buffer. Filter by URL substring, HTTP method, and/or response status. Bodies off by default. |
-| `htk_get_exchange` | Fetches a single exchange by id, with full request + response + bodies. |
+| `htk_list_exchanges` | Paginated, tiered-detail query over the buffer. Summary view is ~150 B per exchange (default); `meta` adds byte counts; `headers` adds full headers. Bodies are never included here. Filter by URL/host substring, HTTP method, response status. |
+| `htk_get_exchange` | Fetches a single exchange by id. Headers and bodies are opt-in (`include_request_headers`, `include_request_body`, `include_response_headers`, `include_response_body`) so you pay only for what you need. |
 
 ## How capture works
 
@@ -155,39 +155,47 @@ The UUID rotates each HTT launch, so explicit `htk_start_capture` calls are usua
 }
 ```
 
-## Output shape (htk_list_exchanges)
+## Context-budget design
+
+An MCP running on an agent's critical path must not be able to blow the context window. This server is designed so the *default* `htk_list_exchanges` response stays around **10 KB even at 50 exchanges** — fine for any agent. Concretely:
+
+- **URLs truncated** at 256 chars, **paths** at 128 chars. If truncated, `urlTruncatedFrom` / `pathTruncatedFrom` report the original length.
+- **Three detail tiers** for `htk_list_exchanges` (agent picks the cheapest that answers the question):
+  - `summary` (default, ~150 B/exchange): `id`, `method`, `scheme`, `host`, `path`, `status`, `responseContentType`
+  - `meta` (~300 B/exchange): summary + byte counts + request/response content-types
+  - `headers` (1–5 KB/exchange): meta + full headers
+- **Bodies never appear in lists** — only in `htk_get_exchange`, and even there they're opt-in via `include_request_body` / `include_response_body`.
+- **Opt-in headers on `htk_get_exchange`** too, via `include_request_headers` / `include_response_headers`.
+- **Hard server-side safety net**: the response is halved and re-serialized in a loop until under 25 KB. If that trips, the response includes `truncated: true` and `truncationNote` telling the agent to paginate or lower the detail tier.
+- **Pagination defaults**: 50 per page, max 500. Every response reports `total`, `matched`, `returned`, `hasMore`, `nextOffset`.
+
+## Example output (htk_list_exchanges, default `summary`)
 
 ```jsonc
 {
-  "total": 127,                // total exchanges currently in buffer
-  "matched": 8,                // after filters
+  "total": 127,
+  "matched": 8,
   "returned": 8,
   "offset": 0,
   "hasMore": false,
+  "detail": "summary",
   "exchanges": [
     {
-      "request": {
-        "id": "...",
-        "method": "GET",
-        "url": "https://api.example.com/v1/things",
-        "protocol": "https",
-        "headers": { "host": "...", "user-agent": "...", ... },
-        "remoteIpAddress": "::ffff:127.0.0.1",
-        "tags": []
-      },
-      "response": {           // undefined if request still in flight
-        "id": "...",
-        "statusCode": 200,
-        "statusMessage": "OK",
-        "headers": { ... },
-        "tags": []
-      }
+      "id": "abc-...",
+      "method": "POST",
+      "scheme": "https",
+      "host": "api.example.com",
+      "path": "/v1/things",
+      "url": "https://api.example.com/v1/things",
+      "status": 200,
+      "responseContentType": "application/json",
+      "hasResponse": true
     }
   ]
 }
 ```
 
-Bodies are omitted by default to keep list responses small. Pass `include_bodies: true` to include them inline, or use `htk_get_exchange(id)` to fetch the full exchange.
+Bump `detail` to `meta` for sizes and content-types, `headers` for full header dicts. Call `htk_get_exchange(id, include_*)` for bodies.
 
 ## What this server will NOT do
 
