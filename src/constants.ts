@@ -3,7 +3,7 @@
  * release so the agent can verify which code is actually running via
  * htk_check_connection / htk_capture_status.
  */
-export const MCP_SERVER_VERSION = "0.4.0";
+export const MCP_SERVER_VERSION = "0.4.1";
 
 export const DEFAULT_ADMIN_URL = "http://127.0.0.1:45456";
 export const DEFAULT_SERVER_URL = "http://127.0.0.1:45457";

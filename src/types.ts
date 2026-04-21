@@ -82,6 +82,19 @@ export interface ConnectionStatus {
     matchedPid?: number;
     reason?: string;
   };
+  /**
+   * Populated when htk_check_connection re-ran Windows token auto-detection
+   * during the call (e.g. because the initial probe was auth-rejected, or the
+   * token wasn't available at MCP startup). Lets the agent tell the user the
+   * server self-healed rather than surfacing the 403 they would've seen.
+   */
+  authTokenRefreshed?: {
+    changed: boolean;
+    reason: "env-configured" | "autodetect-disabled" | "autodetect-succeeded"
+          | "autodetect-failed" | "not-on-windows";
+    previousSource: "env" | "auto-detected" | "none";
+    newSource: "env" | "auto-detected" | "none";
+  };
   sessionIdConfigured: boolean;
   sessionIdResolved?: string;
   sessionSource?: "env-override";

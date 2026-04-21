@@ -79,3 +79,80 @@ export async function loadConfig(): Promise<HtkConfig> {
     headers,
   };
 }
+
+export interface RefreshResult {
+  /** True if the token value changed as a result of this refresh. */
+  changed: boolean;
+  /** Why we did or didn't refresh. */
+  reason:
+    | "env-configured"                 // HTK_SERVER_TOKEN set; refresh skipped
+    | "autodetect-disabled"            // HTK_DISABLE_TOKEN_AUTODETECT=1
+    | "autodetect-succeeded"           // found a new token
+    | "autodetect-failed"              // no token found in scanned processes
+    | "not-on-windows";                // PEB walk only runs on Windows
+  previousSource: HtkConfig["authTokenSource"];
+  newSource: HtkConfig["authTokenSource"];
+  detect?: DetectResult;
+}
+
+/**
+ * Re-run the Windows PEB-walk auto-detection and mutate `config` in place if
+ * the token changed. Safe to call any time after loadConfig. No-op when
+ * HTK_SERVER_TOKEN was set explicitly (that takes precedence) or auto-detect
+ * is disabled. Use after an auth_rejected response to self-heal stale tokens
+ * caused by HTTP Toolkit restarting in the background.
+ */
+export async function refreshAuthToken(config: HtkConfig): Promise<RefreshResult> {
+  const previousSource = config.authTokenSource;
+  const previousToken = config.authToken;
+
+  if (previousSource === "env") {
+    return { changed: false, reason: "env-configured", previousSource, newSource: previousSource };
+  }
+  if (process.env.HTK_DISABLE_TOKEN_AUTODETECT === "1") {
+    return { changed: false, reason: "autodetect-disabled", previousSource, newSource: previousSource };
+  }
+  if (process.platform !== "win32") {
+    return { changed: false, reason: "not-on-windows", previousSource, newSource: previousSource };
+  }
+
+  const detect = await detectHtkTokenOnWindows();
+  config.autoDetect = detect;
+
+  if (detect.token) {
+    const changed = detect.token !== previousToken;
+    config.authToken = detect.token;
+    config.authTokenSource = "auto-detected";
+    config.headers["Authorization"] = `Bearer ${detect.token}`;
+    config.headers["Origin"] = "https://app.httptoolkit.tech";
+    return {
+      changed,
+      reason: "autodetect-succeeded",
+      previousSource,
+      newSource: "auto-detected",
+      detect,
+    };
+  }
+
+  // No token this time — if we previously had one that's now invalid, clear it.
+  if (previousToken) {
+    config.authToken = undefined;
+    config.authTokenSource = "none";
+    delete config.headers["Authorization"];
+    config.headers["Origin"] = "http://localhost";
+    return {
+      changed: true,
+      reason: "autodetect-failed",
+      previousSource,
+      newSource: "none",
+      detect,
+    };
+  }
+  return {
+    changed: false,
+    reason: "autodetect-failed",
+    previousSource,
+    newSource: previousSource,
+    detect,
+  };
+}

@@ -11,7 +11,7 @@ import { z } from "zod";
 import { getBodyRange, searchBody, type BodyAccessError } from "./body-access.js";
 import { CaptureBuffer } from "./buffer.js";
 import { CaptureManager } from "./capture-manager.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, refreshAuthToken, type RefreshResult } from "./config.js";
 import {
   HOW_TO_GET_SESSION_ID,
   POST_START_WARNING,
@@ -129,7 +129,26 @@ Use this before htk_capture_traffic to confirm HTTP Toolkit is running and a ses
     },
   },
   async () => {
-    const probe = await fetchServerVersion();
+    let probe = await fetchServerVersion();
+    let tokenRefresh: RefreshResult | undefined;
+
+    // Self-heal: if HTT is up but rejected our token, it's probably stale
+    // (HTT restarted and rotated the token). Re-run auto-detect once and
+    // retry the probe. Agents don't need to know about MCP restarts.
+    if (probe.kind === "auth_rejected") {
+      tokenRefresh = await refreshAuthToken(config);
+      if (tokenRefresh.changed) {
+        probe = await fetchServerVersion();
+      }
+    }
+
+    // Also opportunistic: if auto-detect failed at startup (HTT was down),
+    // retry now so the MCP gets a token without needing a restart.
+    if (probe.kind === "ok" && !config.authToken && !tokenRefresh) {
+      tokenRefresh = await refreshAuthToken(config);
+      // No need to re-probe: server is already ok. Token updates future calls.
+    }
+
     let sessionIdResolved: string | undefined;
     if (probe.kind === "ok" && config.sessionId) {
       sessionIdResolved = config.sessionId;
@@ -137,9 +156,15 @@ Use this before htk_capture_traffic to confirm HTTP Toolkit is running and a ses
 
     let hint: string | undefined;
     if (probe.kind === "auth_rejected") {
-      hint = config.authToken
-        ? `HTTP Toolkit rejected the auth token (source: ${config.authTokenSource}). The token regenerates on every HTTP Toolkit restart — if auto-detect found a stale PID, restart this MCP server to re-scan.`
-        : "HTTP Toolkit requires an auth token. Auto-detection failed; launch HTTP Toolkit first or set HTK_SERVER_TOKEN manually.";
+      if (tokenRefresh?.reason === "autodetect-succeeded" && tokenRefresh.changed) {
+        hint = "Token was refreshed but HTTP Toolkit still rejected it. The server may be in an unusual state — try restarting HTTP Toolkit.";
+      } else if (tokenRefresh?.reason === "autodetect-failed") {
+        hint = "HTTP Toolkit is reachable but no valid token could be auto-detected from its subprocess. Make sure the HTTP Toolkit desktop app finished launching, then retry.";
+      } else {
+        hint = config.authToken
+          ? `HTTP Toolkit rejected the auth token (source: ${config.authTokenSource}).`
+          : "HTTP Toolkit requires an auth token. Auto-detection couldn't find one; launch HTTP Toolkit and retry, or set HTK_SERVER_TOKEN manually.";
+      }
     } else if (probe.kind === "unreachable") {
       hint = "HTTP Toolkit doesn't appear to be running. Launch the desktop app and try again.";
     } else if (probe.kind === "http_error") {
@@ -170,6 +195,14 @@ Use this before htk_capture_traffic to confirm HTTP Toolkit is running and a ses
             attemptedPids: config.autoDetect.attemptedPids,
             matchedPid: config.autoDetect.pid,
             reason: config.autoDetect.reason,
+          }
+        : undefined,
+      authTokenRefreshed: tokenRefresh
+        ? {
+            changed: tokenRefresh.changed,
+            reason: tokenRefresh.reason,
+            previousSource: tokenRefresh.previousSource,
+            newSource: tokenRefresh.newSource,
           }
         : undefined,
       sessionIdConfigured: !!config.sessionId,
