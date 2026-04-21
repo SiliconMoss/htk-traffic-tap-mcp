@@ -98,11 +98,13 @@ export class CaptureBuffer {
 
   query(opts: BufferQueryOptions): BufferQueryResult {
     const matching: CapturedExchange[] = [];
-    const iter = opts.newestFirst !== false
-      ? [...this.order].reverse()
-      : [...this.order];
+    const newestFirst = opts.newestFirst !== false;
+    const start = newestFirst ? this.order.length - 1 : 0;
+    const end = newestFirst ? -1 : this.order.length;
+    const step = newestFirst ? -1 : 1;
 
-    for (const id of iter) {
+    for (let i = start; i !== end; i += step) {
+      const id = this.order[i];
       const ex = this.map.get(id);
       if (!ex) continue;
       if (opts.urlFilter && !ex.request.url.includes(opts.urlFilter)) continue;

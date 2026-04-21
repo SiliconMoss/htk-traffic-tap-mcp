@@ -478,15 +478,37 @@ Returns:
 
     // Server-side safety net: loop-truncate until under CHARACTER_LIMIT.
     let text = JSON.stringify(view, null, 2);
-    while (text.length > CHARACTER_LIMIT && view.exchanges.length > 1) {
-      const keep = Math.max(1, Math.floor(view.exchanges.length / 2));
+    if (text.length > CHARACTER_LIMIT && view.exchanges.length > 1) {
+      // Find the largest prefix that fits via prefix-sum binary search, so
+      // we do one final stringify rather than log(N) halving passes.
+      const exchangeJson = rendered.map((e) => JSON.stringify(e, null, 2));
+      const prefixSum = new Array<number>(exchangeJson.length + 1);
+      prefixSum[0] = 0;
+      // Each exchange contributes its JSON + a ",\n  " separator (~5 chars);
+      // a small cushion absorbs indent drift across levels.
+      const perItemOverhead = 6;
+      for (let i = 0; i < exchangeJson.length; i++) {
+        prefixSum[i + 1] = prefixSum[i] + exchangeJson[i].length + perItemOverhead;
+      }
+      // Upper bound on the non-exchange portion of the envelope.
+      const envelopeProbe = { ...view, exchanges: [] as unknown[], truncated: true, truncationNote:
+        `Response exceeded ${CHARACTER_LIMIT} chars; trimmed to X exchanges. Lower 'detail' level or use filters to see more per page.` };
+      const envelopeBytes = JSON.stringify(envelopeProbe, null, 2).length;
+      const budget = CHARACTER_LIMIT - envelopeBytes;
+      let lo = 1, hi = exchangeJson.length;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (prefixSum[mid] <= budget) lo = mid;
+        else hi = mid - 1;
+      }
+      const keep = lo;
       view.exchanges = view.exchanges.slice(0, keep);
       view.returned = view.exchanges.length;
       view.hasMore = true;
       view.nextOffset = offset + view.exchanges.length;
       view.truncated = true;
       view.truncationNote =
-        `Response exceeded ${CHARACTER_LIMIT} chars; halved to ${keep} exchanges. ` +
+        `Response exceeded ${CHARACTER_LIMIT} chars; trimmed to ${keep} exchanges. ` +
         `Lower 'detail' level or use filters to see more per page.`;
       text = JSON.stringify(view, null, 2);
     }
