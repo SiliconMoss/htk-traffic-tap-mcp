@@ -80,6 +80,8 @@ export interface SearchResult {
   decompressionFailed?: boolean;
   wireEncoding?: string;
   warning?: string;
+  /** Agent-facing retry hint — e.g. on zero matches. */
+  hint?: string;
 }
 
 /** Possible failure modes a caller can translate into MCP errors. */
@@ -257,6 +259,8 @@ export function searchBody(
     result.decompressionFailed = true;
     result.wireEncoding = side.wireEncoding;
     result.warning = `0 matches may be expected: body is still ${side.wireEncoding}-compressed (decompression failed at capture time). The regex ran against raw compressed bytes.`;
+  } else if (totalMatches === 0) {
+    result.hint = "0 matches. If the pattern expected text, try the `i` flag for case-insensitive matching, or widen it. For UTF-8 text with non-ASCII chars, remember the regex runs on latin-1 bytes (e.g. 'é' is \\xc3\\xa9). Use htk_get_exchange_body to inspect raw bytes if the body might be binary.";
   }
   return { ok: true, value: result };
 }

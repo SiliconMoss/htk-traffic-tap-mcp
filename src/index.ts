@@ -52,6 +52,16 @@ function jsonResult<T extends Record<string, unknown>>(data: T) {
   };
 }
 
+function exchangeNotFoundError(id: string) {
+  return {
+    isError: true,
+    content: [{
+      type: "text" as const,
+      text: `Error: no exchange with id=${id} in buffer. Use htk_list_exchanges to find current ids — note that oldest exchanges are evicted in FIFO order when the buffer fills.`,
+    }],
+  };
+}
+
 type VersionProbe =
   | { kind: "ok"; version: string }
   | { kind: "auth_rejected"; status: number }
@@ -134,6 +144,10 @@ Use this before htk_capture_traffic to confirm HTTP Toolkit is running and a ses
       hint = "HTTP Toolkit doesn't appear to be running. Launch the desktop app and try again.";
     } else if (probe.kind === "http_error") {
       hint = `HTTP Toolkit responded with status ${probe.status}. This is unexpected — check the desktop app logs.`;
+    } else if (probe.kind === "ok" && !config.sessionId
+               && captureManager.status().state === "idle") {
+      // Happy path but nothing is capturing yet — tell the agent exactly what to do next.
+      hint = `HTTP Toolkit is reachable but no capture is running. ${HOW_TO_GET_SESSION_ID}`;
     }
 
     const status: ConnectionStatus = {
@@ -437,6 +451,7 @@ Returns:
       exchanges: unknown[];
       truncated?: boolean;
       truncationNote?: string;
+      note?: string;
     } = {
       total: rawQuery.total,
       matched,
@@ -447,6 +462,19 @@ Returns:
       detail: level,
       exchanges: rendered,
     };
+
+    // Disambiguate the two flavors of an empty result: nothing buffered vs
+    // filters-excluded-everything. Agents otherwise can't tell these apart.
+    if (rendered.length === 0) {
+      if (rawQuery.total === 0) {
+        const capState = captureManager.status().state;
+        view.note = capState === "running"
+          ? "Buffer is empty — capture is running but no traffic has flowed yet. Ask the user to reproduce the activity, then retry."
+          : `Buffer is empty and capture is ${capState}. Call htk_capture_status for next steps (likely htk_start_capture).`;
+      } else if (matched === 0) {
+        view.note = "No exchanges matched the filter. Try loosening url_filter / host_filter / method_filter / status_filter, or call with no filters to confirm the buffer isn't empty.";
+      }
+    }
 
     // Server-side safety net: loop-truncate until under CHARACTER_LIMIT.
     let text = JSON.stringify(view, null, 2);
@@ -494,15 +522,7 @@ Args:
   },
   async (params) => {
     const ex = captureManager.getBuffer().get(params.id);
-    if (!ex) {
-      return {
-        isError: true,
-        content: [{
-          type: "text" as const,
-          text: `Error: no exchange with id=${params.id} in buffer. Use htk_list_exchanges to find valid ids.`,
-        }],
-      };
-    }
+    if (!ex) return exchangeNotFoundError(params.id);
     const view = getExchangeView(ex, {
       includeRequestHeaders: params.include_request_headers,
       includeResponseHeaders: params.include_response_headers,
@@ -586,15 +606,7 @@ Errors: body-skipped (filter-suppressed), body-missing (empty / not captured), s
   },
   async (params) => {
     const ex = captureManager.getBuffer().get(params.id);
-    if (!ex) {
-      return {
-        isError: true,
-        content: [{
-          type: "text" as const,
-          text: `Error: no exchange with id=${params.id} in buffer.`,
-        }],
-      };
-    }
+    if (!ex) return exchangeNotFoundError(params.id);
     const side = params.which === "request" ? ex.request : ex.response;
     const result = getBodyRange(params.id, params.which, side, params.offset, params.length);
     if (!result.ok) return bodyErrorToMcp(params.id, params.which, result.error);
@@ -645,15 +657,7 @@ Returns: { totalMatches, returned, truncated, matches: [{offset, lineNumber, col
   },
   async (params) => {
     const ex = captureManager.getBuffer().get(params.id);
-    if (!ex) {
-      return {
-        isError: true,
-        content: [{
-          type: "text" as const,
-          text: `Error: no exchange with id=${params.id} in buffer.`,
-        }],
-      };
-    }
+    if (!ex) return exchangeNotFoundError(params.id);
     const side = params.which === "request" ? ex.request : ex.response;
     const result = searchBody(
       params.id,

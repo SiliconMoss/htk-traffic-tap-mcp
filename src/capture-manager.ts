@@ -17,6 +17,12 @@ export type ManagerState =
 export interface ManagerStatus {
   mcpServerVersion: string;
   state: "idle" | "connecting" | "running" | "stopped";
+  /**
+   * True only when state === "running" and no subscription error has been
+   * reported. An agent should treat false as "capture may not be delivering
+   * events, warn the user" even if `state` is "running".
+   */
+  healthy: boolean;
   sessionId?: string;
   startedAt?: number;
   startedAtIso?: string;
@@ -84,6 +90,9 @@ export class CaptureManager {
         // Fallback: some servers might skip connection_ack in edge cases;
         // first real event also counts as "running".
         this.markRunning(opts.sessionId, startedAt);
+        // A successful event means the subscription is live again; clear any
+        // transient error so `healthy` recovers.
+        this.lastError = undefined;
         if (event.kind === "request") {
           this.buffer.pushRequest(event.exchange);
         } else if (event.kind === "response") {
@@ -164,6 +173,7 @@ export class CaptureManager {
     const base: ManagerStatus = {
       mcpServerVersion: MCP_SERVER_VERSION,
       state: this.state.kind,
+      healthy: this.state.kind === "running" && !this.lastError,
       bufferedExchanges: this.buffer.size(),
       bufferCapacity: cap.exchanges,
       bufferedBodyBytes: this.buffer.bodyBytes(),
