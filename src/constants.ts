@@ -34,4 +34,13 @@ export const DEFAULT_SEARCH_CONTEXT = 64;
 export const DEFAULT_SEARCH_MAX_MATCHES = 20;
 export const MAX_SEARCH_MAX_MATCHES = 100;
 
+/**
+ * Wall-clock budget for a regex body search. Best-effort: V8's vm timeout
+ * interrupts between match attempts, which catches most catastrophic-backtracking
+ * patterns but is not a hard guarantee for all pathological cases. Combined
+ * with the pattern-length and body-size caps this keeps the tool bounded in
+ * practice without requiring a native re2 dependency.
+ */
+export const SEARCH_TIMEOUT_MS = 2000;
+
 export const SESSION_PROBE_TIMEOUT_MS = 2000;

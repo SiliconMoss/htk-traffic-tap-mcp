@@ -596,6 +596,9 @@ function bodyErrorToMcp(id: string, which: "request" | "response", err: BodyAcce
     case "bad-regex":
       text = `Error: invalid regex pattern: ${err.message}`;
       break;
+    case "search-timeout":
+      text = `Error: regex search exceeded ${err.timeoutMs}ms and was aborted. Catastrophic backtracking is the usual cause (e.g. nested quantifiers like (a+)+); simplify the pattern — use atomic alternatives, anchor it, or narrow the body range via htk_get_exchange_body first.`;
+      break;
   }
   return { isError: true, content: [{ type: "text" as const, text }] };
 }

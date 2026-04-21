@@ -20,6 +20,7 @@
  *   - slice length ≤ 8 KB per getBodyRange call (agent paginates).
  */
 
+import vm from "node:vm";
 import {
   DEFAULT_SEARCH_CONTEXT,
   DEFAULT_SEARCH_MAX_MATCHES,
@@ -27,6 +28,7 @@ import {
   MAX_SEARCHABLE_BODY_BYTES,
   MAX_SEARCH_MAX_MATCHES,
   MAX_SEARCH_PATTERN_LENGTH,
+  SEARCH_TIMEOUT_MS,
 } from "./constants.js";
 import type { BodyData } from "./types.js";
 
@@ -91,7 +93,8 @@ export type BodyAccessError =
   | { kind: "side-missing"; reason: string }        // e.g. response not arrived yet
   | { kind: "body-too-big"; totalBytes: number; limit: number }
   | { kind: "pattern-too-long"; length: number; limit: number }
-  | { kind: "bad-regex"; message: string };
+  | { kind: "bad-regex"; message: string }
+  | { kind: "search-timeout"; timeoutMs: number };
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: BodyAccessError };
 
@@ -223,26 +226,47 @@ export function searchBody(
   const ctxAfter = Math.max(0, Math.min(512, Math.floor(contextAfter)));
 
   const haystack = buf.toString("latin1");
-  const matches: SearchMatch[] = [];
-  let totalMatches = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(haystack)) !== null) {
-    totalMatches++;
-    if (matches.length < cappedMax) {
-      const offset = m.index;
-      const end = offset + m[0].length;
-      const { lineNumber, column } = locate(buf, offset);
-      matches.push({
-        offset,
-        lineNumber,
-        column,
-        match: latin1SliceAsUtf8(buf, offset, end),
-        before: latin1SliceAsUtf8(buf, offset - ctxBefore, offset),
-        after: latin1SliceAsUtf8(buf, end, end + ctxAfter),
-      });
+
+  // Run matching inside a vm sandbox so the SEARCH_TIMEOUT_MS wall-clock cap
+  // applies. This catches most catastrophic-backtracking patterns; combined
+  // with the pattern-length / body-size caps it keeps the tool bounded.
+  let raw: { out: Array<{ index: number; length: number }>; total: number };
+  try {
+    raw = vm.runInNewContext(
+      `(function (re, haystack, cappedMax) {
+        const out = [];
+        let total = 0;
+        let m;
+        while ((m = re.exec(haystack)) !== null) {
+          total++;
+          if (out.length < cappedMax) out.push({ index: m.index, length: m[0].length });
+          if (m[0].length === 0) re.lastIndex++;
+        }
+        return { out: out, total: total };
+      })(re, haystack, cappedMax)`,
+      { re, haystack, cappedMax },
+      { timeout: SEARCH_TIMEOUT_MS },
+    ) as { out: Array<{ index: number; length: number }>; total: number };
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (msg.includes("Script execution timed out")) {
+      return { ok: false, error: { kind: "search-timeout", timeoutMs: SEARCH_TIMEOUT_MS } };
     }
-    if (m[0].length === 0) re.lastIndex++;
+    throw err;
   }
+  const totalMatches = raw.total;
+  const matches: SearchMatch[] = raw.out.map(({ index, length }) => {
+    const end = index + length;
+    const { lineNumber, column } = locate(buf, index);
+    return {
+      offset: index,
+      lineNumber,
+      column,
+      match: latin1SliceAsUtf8(buf, index, end),
+      before: latin1SliceAsUtf8(buf, index - ctxBefore, index),
+      after: latin1SliceAsUtf8(buf, end, end + ctxAfter),
+    };
+  });
 
   const result: SearchResult = {
     id,
