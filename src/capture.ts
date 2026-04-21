@@ -1,6 +1,95 @@
+import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from "node:zlib";
 import WebSocket from "ws";
 import type { FilterRegistry, SkipFilter } from "./filters.js";
-import type { CapturedExchange, CapturedRequest, CapturedResponse } from "./types.js";
+import type {
+  BodyData,
+  CapturedExchange,
+  CapturedRequest,
+  CapturedResponse,
+} from "./types.js";
+
+/** 16 MB — guardrail against decompression bombs. */
+const MAX_DECOMPRESSED_BYTES = 16 * 1024 * 1024;
+
+function pickContentEncoding(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== "object") return undefined;
+  const h = headers as Record<string, string | string[]>;
+  for (const [k, v] of Object.entries(h)) {
+    if (k.toLowerCase() === "content-encoding") {
+      const str = Array.isArray(v) ? v[0] : v;
+      return str?.toLowerCase().trim();
+    }
+  }
+  return undefined;
+}
+
+function tryDecompress(
+  buf: Buffer,
+  encoding: string,
+): { decoded: Buffer } | undefined {
+  try {
+    let out: Buffer;
+    switch (encoding) {
+      case "gzip":
+      case "x-gzip":
+        out = gunzipSync(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
+        break;
+      case "deflate":
+        // Heuristic: HTTP deflate is ambiguous (zlib vs raw). Try zlib first,
+        // fall back to raw.
+        try {
+          out = inflateSync(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
+        } catch {
+          out = inflateRawSync(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
+        }
+        break;
+      case "br":
+        out = brotliDecompressSync(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
+        break;
+      default:
+        return undefined;
+    }
+    return { decoded: out };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Decode base64 body and decompress if Content-Encoding is supported.
+ * Returns populated BodyData fields (bodyBuffer, bodyBytes, wireEncoding,
+ * wireBodyBytes).
+ */
+function decodeBody(
+  base64: string | undefined,
+  headers: unknown,
+): Pick<BodyData, "bodyBuffer" | "bodyBytes" | "wireEncoding" | "wireBodyBytes"> {
+  if (!base64) return { bodyBytes: 0 };
+  let raw: Buffer;
+  try { raw = Buffer.from(base64, "base64"); }
+  catch { return { bodyBytes: 0 }; }
+
+  const wireEncoding = pickContentEncoding(headers);
+  if (wireEncoding) {
+    const result = tryDecompress(raw, wireEncoding);
+    if (result) {
+      return {
+        bodyBuffer: result.decoded,
+        bodyBytes: result.decoded.byteLength,
+        wireEncoding,
+        wireBodyBytes: raw.byteLength,
+      };
+    }
+    // Decompression failed (unknown encoding, corrupted, too big) —
+    // store raw so the agent still has something to inspect.
+    return {
+      bodyBuffer: raw,
+      bodyBytes: raw.byteLength,
+      wireEncoding,  // marker: bytes are still compressed
+    };
+  }
+  return { bodyBuffer: raw, bodyBytes: raw.byteLength };
+}
 
 const REQUEST_QUERY = `subscription {
   requestReceived {
@@ -28,15 +117,6 @@ const RESPONSE_QUERY = `subscription {
     tags
   }
 }`;
-
-function decodeBuffer(base64: string | undefined): Buffer | undefined {
-  if (!base64) return undefined;
-  try {
-    return Buffer.from(base64, "base64");
-  } catch {
-    return undefined;
-  }
-}
 
 export type CaptureEvent =
   | { kind: "request"; exchange: CapturedExchange }
@@ -157,7 +237,7 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
           bodySkipPattern: skip.pattern,
         };
       } else {
-        const buf = decodeBuffer(rr.body);
+        const body = decodeBody(rr.body, rr.headers);
         request = {
           id: rr.id,
           method: rr.method,
@@ -166,8 +246,7 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
           headers: rr.headers,
           remoteIpAddress: rr.remoteIpAddress,
           tags: rr.tags ?? [],
-          bodyBuffer: buf,
-          bodyBytes: buf?.byteLength ?? 0,
+          ...body,
         };
       }
       opts.onEvent({ kind: "request", exchange: { request } });
@@ -195,15 +274,14 @@ export function subscribeToSession(opts: SubscribeOptions): Subscription {
         };
         skipByRequestId.delete(rc.id);
       } else {
-        const buf = decodeBuffer(rc.body);
+        const body = decodeBody(rc.body, rc.headers);
         response = {
           id: rc.id,
           statusCode: rc.statusCode,
           statusMessage: rc.statusMessage,
           headers: rc.headers,
           tags: rc.tags ?? [],
-          bodyBuffer: buf,
-          bodyBytes: buf?.byteLength ?? 0,
+          ...body,
         };
       }
       opts.onEvent({ kind: "response", requestId: rc.id, response });

@@ -117,9 +117,13 @@ export interface ExchangeMeta extends ExchangeSummary {
   requestHeaderCount: number;
   requestHeaderBytes: number;
   requestBodyBytes: number;
+  requestWireEncoding?: string;
+  requestWireBodyBytes?: number;
   responseHeaderCount?: number;
   responseHeaderBytes?: number;
   responseBodyBytes?: number;
+  responseWireEncoding?: string;
+  responseWireBodyBytes?: number;
   responseStatusMessage?: string;
 }
 
@@ -171,9 +175,13 @@ export function toMeta(exchange: CapturedExchange): ExchangeMeta {
     requestHeaderCount: Object.keys(reqHeaders).length,
     requestHeaderBytes: headerBytes(reqHeaders),
     requestBodyBytes: req.bodyBytes,
+    requestWireEncoding: req.wireEncoding,
+    requestWireBodyBytes: req.wireBodyBytes,
     responseHeaderCount: respHeaders ? Object.keys(respHeaders).length : undefined,
     responseHeaderBytes: respHeaders ? headerBytes(respHeaders) : undefined,
     responseBodyBytes: resp?.bodyBytes,
+    responseWireEncoding: resp?.wireEncoding,
+    responseWireBodyBytes: resp?.wireBodyBytes,
     responseStatusMessage: resp?.statusMessage,
   };
 }
@@ -215,6 +223,8 @@ export interface GetExchangeView {
   request: {
     headers?: Record<string, string>;
     bodyBytes: number;
+    wireEncoding?: string;
+    wireBodyBytes?: number;
     bodySkipped?: BodySkipInfo;
   };
   response?: {
@@ -222,6 +232,8 @@ export interface GetExchangeView {
     statusMessage: string;
     headers?: Record<string, string>;
     bodyBytes: number;
+    wireEncoding?: string;
+    wireBodyBytes?: number;
     bodySkipped?: BodySkipInfo;
   };
 }
@@ -254,6 +266,8 @@ export function getExchangeView(
     request: {
       headers: opts.includeRequestHeaders ? normalizeHeaders(req.headers) : undefined,
       bodyBytes: req.bodyBytes,
+      wireEncoding: req.wireEncoding,
+      wireBodyBytes: req.wireBodyBytes,
       bodySkipped: skipInfoFor(req),
     },
     response: resp
@@ -262,6 +276,8 @@ export function getExchangeView(
           statusMessage: resp.statusMessage,
           headers: opts.includeResponseHeaders ? normalizeHeaders(resp.headers) : undefined,
           bodyBytes: resp.bodyBytes,
+          wireEncoding: resp.wireEncoding,
+          wireBodyBytes: resp.wireBodyBytes,
           bodySkipped: skipInfoFor(resp),
         }
       : undefined,

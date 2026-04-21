@@ -37,7 +37,7 @@ const captureManager = new CaptureManager(
 
 const server = new McpServer({
   name: "htk-traffic-tap-mcp",
-  version: "0.3.0",
+  version: "0.3.1",
 });
 
 function jsonResult<T extends Record<string, unknown>>(data: T) {

@@ -1,8 +1,21 @@
 export interface BodyData {
-  /** Raw body bytes. Undefined if skipped by filter or absent. */
+  /**
+   * Body bytes as stored in the buffer. If the wire body had a supported
+   * Content-Encoding (gzip / deflate / br), this is the DECODED bytes — so
+   * regex search / UTF-8 decoding work directly. The original wire encoding
+   * is recorded in wireEncoding for transparency. Undefined if skipped/absent.
+   */
   bodyBuffer?: Buffer;
   /** Convenience: bodyBuffer?.byteLength ?? 0. Reported even when skipped (will be 0). */
   bodyBytes: number;
+  /**
+   * If the server sent the body with a supported Content-Encoding, this is
+   * the name of that encoding (e.g. "gzip"). bodyBuffer above is the
+   * DECOMPRESSED form. Undefined means the body was stored as-is.
+   */
+  wireEncoding?: string;
+  /** Size of the body as it was on the wire (pre-decompression), if different from bodyBytes. */
+  wireBodyBytes?: number;
   /** True when a URL skip filter matched this exchange — body intentionally not captured. */
   bodySkipped?: boolean;
   /** Filter id that caused the skip, if any. */
