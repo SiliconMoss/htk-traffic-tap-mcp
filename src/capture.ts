@@ -12,12 +12,22 @@ import type {
 const MAX_DECOMPRESSED_BYTES = 16 * 1024 * 1024;
 
 function pickContentEncoding(headers: unknown): string | undefined {
-  if (!headers || typeof headers !== "object") return undefined;
-  const h = headers as Record<string, string | string[]>;
+  // HTT ships the `headers` GraphQL Json scalar either as a plain object
+  // or as a JSON-encoded string. Handle both.
+  let h: Record<string, unknown> | undefined;
+  if (typeof headers === "string") {
+    try {
+      const parsed = JSON.parse(headers);
+      if (parsed && typeof parsed === "object") h = parsed as Record<string, unknown>;
+    } catch { /* not valid json — ignore */ }
+  } else if (headers && typeof headers === "object") {
+    h = headers as Record<string, unknown>;
+  }
+  if (!h) return undefined;
   for (const [k, v] of Object.entries(h)) {
     if (k.toLowerCase() === "content-encoding") {
       const str = Array.isArray(v) ? v[0] : v;
-      return str?.toLowerCase().trim();
+      return typeof str === "string" ? str.toLowerCase().trim() : undefined;
     }
   }
   return undefined;
